@@ -1,0 +1,71 @@
+#!/bin/bash
+
+set -x
+set -e
+
+here=$(dirname $(realpath "$0"))
+
+dir="$1"
+mirrors="$2"
+
+function incorporate {
+    name=$1
+    url=$2
+
+    before=$(git log --all --oneline | wc -l)
+
+    git remote add "$name" "$url"
+    git config --local "remote.$name.fetch" "+refs/heads/*:refs/heads/$name/*"
+    git config --local --add "remote.$name.fetch" "+refs/tags/*:refs/tags/$name/*"
+    git fetch --no-tags "$name"
+    git remote remove "$name"
+
+    after=$(git log --all --oneline | wc -l)
+
+    newlogs=$((after - before))
+    echo "After incorporating $name $newlogs changes."
+}
+
+function pushdown {
+    name=$1
+    branch=$2
+
+    echo "Pushing $branch into $name."
+
+    git switch -c pushdown "$branch"
+    dir=$(mktemp -d tmp.XXXX)
+    for f in * .*; do
+        if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
+            git mv "$f" "$dir"
+        fi
+    done
+    git mv "$dir" "$name"
+    git commit -m "Moving $name to subdir."
+    if [ -z "$(git show-ref heads/master)" ]; then
+        git checkout --orphan master
+        ff="--ff-only"
+    else
+        git checkout master
+        ff="--no-ff"
+    fi
+    git merge --allow-unrelated-histories -s recursive -X no-renames $ff -m "Merging $name to master." pushdown
+    git branch -d pushdown
+
+    echo "Done pushing $branch into $name."
+    sleep 1
+}
+
+
+mkdir -p "$dir"
+cd "$dir"
+git init
+git commit --allow-empty -m "Creating combined repo."
+sleep 1
+
+# Incorporate constituent repos and combine into master branch
+ls -d "$here"/"$mirrors"/*.git | sort | while read -r repo; do
+    name=$(basename "$repo" .git)
+    echo "Incorporating $name ..."
+    incorporate "$name" "$repo"
+    pushdown "$name" "$name"/master
+done
