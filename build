@@ -30,42 +30,56 @@ function pushdown {
     name=$1
     branch=$2
 
-    echo "Pushing $branch into $name."
+    if [ ! -z "$(git show-ref "$branch")" ]; then
 
-    git switch -c pushdown "$branch"
-    dir=$(mktemp -d tmp.XXXX)
-    for f in * .*; do
-        if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
-            git mv "$f" "$dir"
+        echo "Pushing $branch into $name."
+
+        git switch -c pushdown "$branch"
+        dir=$(mktemp -d tmp.XXXX)
+        moved_something="false"
+        for f in * .*; do
+            if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
+                git mv "$f" "$dir"
+                moved_something="true"
+            fi
+        done
+        if [ "$moved_something" == "true" ]; then
+            git mv "$dir" "$name"
+        else
+            mv "$dir" "$name"
+            echo "No files in master branch." > "$name/empty-master.txt"
+            git add "$name/empty-master.txt"
         fi
-    done
-    git mv "$dir" "$name"
-    git commit -m "Moving $name to subdir."
-    if [ -z "$(git show-ref heads/master)" ]; then
-        git checkout --orphan master
-        ff="--ff-only"
-    else
+        git commit  --allow-empty -m "Moving $name to subdir."
         git checkout master
-        ff="--no-ff"
-    fi
-    git merge --allow-unrelated-histories -s recursive -X no-renames $ff -m "Merging $name to master." pushdown
-    git branch -d pushdown
+        git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $name to master." pushdown
+        git branch -d pushdown
 
-    echo "Done pushing $branch into $name."
-    sleep 1
+        echo "Done pushing $branch into $name."
+        sleep 1
+    else
+        echo "No branch $branch to merge into master."
+        git show-ref | grep "refs/heads/$name"
+    fi
 }
 
 
 mkdir -p "$dir"
 cd "$dir"
-git init
-git commit --allow-empty -m "Creating combined repo."
-sleep 1
+if [ ! -d ".git" ]; then
+    git init
+    git commit --allow-empty -m "Creating combined repo."
+    sleep 1
+fi
 
 # Incorporate constituent repos and combine into master branch
 ls -d "$here"/"$mirrors"/*.git | sort | while read -r repo; do
-    name=$(basename "$repo" .git)
-    echo "Incorporating $name ..."
-    incorporate "$name" "$repo"
-    pushdown "$name" "$name"/master
+    if git --git-dir "$repo" show-ref; then
+        name=$(basename "$repo" .git)
+        echo "Incorporating $name ..."
+        incorporate "$name" "$repo"
+        pushdown "$name" "$name"/master
+    else
+        echo "Skipping empty repo $repo."
+    fi
 done
