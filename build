@@ -47,10 +47,10 @@ function pushdown {
             git mv "$dir" "$name"
         else
             mv "$dir" "$name"
-            echo "No files in master branch." > "$name/empty-master.txt"
-            git add "$name/empty-master.txt"
+            echo "No files in $branch." > "$name/empty-branch.txt"
+            git add "$name/empty-branch.txt"
         fi
-        git commit  --allow-empty -m "Moving $name to subdir."
+        git commit --allow-empty -m "Moving $name to subdir."
         git checkout master
         git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $name to master." pushdown
         git branch -d pushdown
