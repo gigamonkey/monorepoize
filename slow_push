@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# For very large repos, it may not be possible to push everything to
+# Github all at once because of limits on the pack size. (If my
+# understanding is correct, the git protocol first figures out all the
+# objects that the source repo has the the destination needs, given
+# what you're trying to push and then packs them into a single file
+# called a pack file which it then sends to the destination. And
+# there's a limit on how big those files can be. This script avoids
+# that limit by pushing one ref at a time, reading their names from
+# standard in.
+#
+# If, for instance, you have made a monorepo out of a bunch of other
+# repos, you could push the master branch of each sub-repo separately
+# as each sub-repo is likely small enough to be pushed in one go.
+
+set -ex
+
+while read -r line; do
+    git push origin "$line"
+done
