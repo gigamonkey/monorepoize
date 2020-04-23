@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Patch up a few repos that didn't have a master by incorporating another branch.
+
+set -x
+set -e
+
+dir="$1"
+
+function pushdown {
+    name=$1
+    branch=$2
+
+    if [ ! -z "$(git show-ref "$branch")" ]; then
+
+        echo "Pushing $branch into $name."
+
+        git switch -c pushdown "$branch"
+        dir=$(mktemp -d tmp.XXXX)
+        moved_something="false"
+        for f in * .*; do
+            if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
+                git mv "$f" "$dir"
+                moved_something="true"
+            fi
+        done
+        if [ "$moved_something" == "true" ]; then
+            git mv "$dir" "$name"
+        else
+            mv "$dir" "$name"
+            echo "No files in $branch." > "$name/empty-branch.txt"
+            git add "$name/empty-branch.txt"
+        fi
+        git commit --allow-empty -m "Moving $name to subdir."
+        git checkout master
+        git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $name to master." pushdown
+        git branch -d pushdown
+
+        echo "Done pushing $branch into $name."
+        sleep 1
+    else
+        echo "No branch $branch to merge into master."
+        git show-ref | grep "refs/heads/$name"
+    fi
+}
+
+
+cd "$dir"
+
+#pushdown report-mailer report-mailer/dev
+pushdown scheduler scheduler/prod
+pushdown staff-fundraising staff-fundraising/devel
