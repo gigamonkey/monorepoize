@@ -1,85 +1,23 @@
 #!/bin/bash
 
-set -x
 set -e
 
-here=$(dirname $(realpath "$0"))
+source monorepo.sh
 
-dir="$1"
-mirrors="$2"
+here=$(pwd)
+input=$(realpath "$1")
+branch=${2:-master}
 
-function incorporate {
-    name=$1
-    url=$2
+ensure_repo_dir "$(basename "$1" .repos)"
 
-    before=$(git log --all --oneline | wc -l)
-
-    git remote add "$name" "$url"
-    git config --local "remote.$name.fetch" "+refs/heads/*:refs/heads/$name/*"
-    git config --local --add "remote.$name.fetch" "+refs/tags/*:refs/tags/$name/*"
-    git fetch --no-tags "$name"
-    git remote remove "$name"
-
-    after=$(git log --all --oneline | wc -l)
-
-    newlogs=$((after - before))
-    echo "After incorporating $name $newlogs changes."
-}
-
-function pushdown {
-    name=$1
-    branch=$2
-
-    if [ ! -z "$(git show-ref "$branch")" ]; then
-
-        echo "Pushing $branch into $name."
-
-        git switch -c pushdown "$branch"
-        dir=$(mktemp -d tmp.XXXX)
-        moved_something="false"
-        for f in * .*; do
-            if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
-                git mv "$f" "$dir"
-                moved_something="true"
-            fi
-        done
-        if [ "$moved_something" == "true" ]; then
-            git mv "$dir" "$name"
-        else
-            mv "$dir" "$name"
-            echo "No files in $branch." > "$name/empty-branch.txt"
-            git add "$name/empty-branch.txt"
-        fi
-        git commit --allow-empty -m "Moving $name to subdir."
-        git checkout master
-        git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $name to master." pushdown
-        git branch -d pushdown
-
-        echo "Done pushing $branch into $name."
-        sleep 1
-    else
-        echo "No branch $branch to merge into master."
-        git show-ref | grep "refs/heads/$name"
+while read -r repo; do
+    # Accept either github URLs or a path to a bare repo .git directory.
+    if [ "${repo:0:15}" != "git@github.com:" ]; then
+        repo=$(cd "$here"; realpath "$repo")
     fi
-}
-
-
-mkdir -p "$dir"
-cd "$dir"
-if [ ! -d ".git" ]; then
-    git init
-    git commit --allow-empty -m "Creating combined repo."
-    sleep 1
-fi
-
-# Incorporate constituent repos and combine into master branch
-ls -d "$here"/"$mirrors"/*.git | sort | while read -r repo; do
-    if git --git-dir "$repo" show-ref; then
-        name=$(basename "$repo" .git)
-        echo "Incorporating $name ..."
-        incorporate "$name" "$repo"
-        pushdown "$name" "$name"/master
-    else
-        echo "Skipping empty repo $repo."
-    fi
-done
+    name=${repo##*/}
+    name=${name%.git}
+    echo "Incorporating $name ..."
+    incorporate "$name" "$repo"
+    pushdown "$name/$branch"
+done < "$input"
