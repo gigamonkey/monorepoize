@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 
+"""
+Output a list of git protocol URLs for all the accessible repos of
+a github org or user.
+"""
+
 from functools import reduce
 import json
 import os
@@ -23,7 +28,7 @@ def query(who, after):
         + who
         + '") { repositories('
         + args
-        + ") { edges { cursor node { name description sshUrl defaultBranchRef { name } } } } } }"
+        + ") { edges { cursor node { sshUrl } } } } }"
     )
 
 
@@ -44,13 +49,6 @@ if __name__ == "__main__":
         if len(edges) == 0:
             done = True
         else:
-            for n in (e["node"] for e in edges):
-                print(
-                    json.dumps(
-                        {
-                            **{k: n.get(k) for k in ["name", "description", "sshUrl"]},
-                            "defaultBranch": maybe_get(n, "defaultBranchRef", "name"),
-                        }
-                    )
-                )
+            for e in edges:
+                print(e["node"]["sshUrl"])
             after = edges[-1]["cursor"]
