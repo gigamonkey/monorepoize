@@ -1,3 +1,9 @@
+This repo contains code to combine multiple git repos into a single monolithic repo (a.k.a. a monorepo) while preserving full history, branches, and tags.
+
+The contents of each sub-repo are incorporated with their original history (i.e. every commit to the original repo will exist in the new repo with the same SHA) and all branches and tags will be added, renamed to be prefixed by the name of the repo being added. So if the subrepo is `foo.git` and it contains a branch `whatever`, in the monorepo the same SHA will be pointed to by a branch named `foo/whatever`.
+
+Additionally the contents of `master` branch from each sub-repo will be added in a subdirectory named for the sub-repo and merged to the monorepo's `master` branch.
+
 # To create a monorepo.
 
 - Make a file containing the git URLs of the repos you want to
@@ -6,14 +12,9 @@
   named `something.repos` where `something` is the name of the new
   monorepo you want to create.
 
-- Run `./build something.repos`. It should create a directory named
+- Run `./build something.repos`. It will create a directory named
   `something` and incorporate all the repos listed in the `.repos`
-  file, pushing down all branch and tag names to be prefixed by the
-  name of the repo being added. So if the subrepo is `foo.git` the
-  branches will be `foo/whatever`. It will then look for a
-  `foo/master` branch and if it exists, push the contents of that
-  branch into a `foo` subdirectory and merge it to the monorepo's
-  master branch.
+  file.
 
 - After the monorepo is built, look for `empty-repo.txt` and
   `no-branch.txt` files in the subdirectories. These are created if
