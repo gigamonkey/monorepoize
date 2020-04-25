@@ -1,6 +1,6 @@
 This repo contains code to combine multiple git repos into a single monolithic repo (a.k.a. a monorepo) while preserving full history, branches, and tags.
 
-The contents of each sub-repo are incorporated with their original history (i.e. every commit to the original repo will exist in the new repo with the same SHA) and all branches and tags will be added, renamed to be prefixed by the name of the repo being added. So if the subrepo is `foo.git` and it contains a branch `whatever`, in the monorepo the same SHA will be pointed to by a branch named `foo/whatever`.
+The contents of each sub-repo are incorporated with their original history (i.e. every commit to the original repo will exist in the new repo with the same SHA) and all branches and tags will be added, renamed to be prefixed by the name of the repo being added. So if the subrepo is `foo.git` and it contains a branch `whatever`, in the monorepo the SHA pointed to by the branch `whatever` in the original repo will now be pointed to by a branch named `foo/whatever`.
 
 Additionally the contents of `master` branch from each sub-repo will be added in a subdirectory named for the sub-repo and merged to the monorepo's `master` branch.
 
