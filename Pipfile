@@ -10,12 +10,7 @@ requests = "*"
 autoflake = "*"
 black = "==19.3b0"
 flake8 = "*"
-hypothesis = "*"
 isort = "*"
-mypy = "*"
-oauth2client = "*"
-pytest = "*"
-pytest-cov = "*"
 
 [requires]
 python_version = "3.7"
