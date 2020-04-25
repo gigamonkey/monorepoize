@@ -23,10 +23,11 @@ function ensure_repo_dir {
 }
 
 function incorporate {
-    local name=$1
-    local url=$2
+    local name url before after
 
-    local before=$(git log --all --oneline | wc -l)
+    name=$1
+    url=$2
+    before=$(git log --all --oneline | wc -l)
 
     git remote add "$name" "$url"
     git config --local "remote.$name.fetch" "+refs/heads/*:refs/heads/$name/*"
@@ -34,23 +35,25 @@ function incorporate {
     git fetch --no-tags "$name"
     git remote remove "$name"
 
-    local after=$(git log --all --oneline | wc -l)
+    after=$(git log --all --oneline | wc -l)
 
     echo "After incorporating $name $((after - before)) changes."
 }
 
 function pushdown {
 
-    local branch=$1
-    local name=${branch%%/*}
+    local branch name dir moved_something
+
+    branch=$1
+    name=${branch%%/*}
 
     if [ -n "$(git show-ref "$branch")" ]; then
 
         echo "Pushing $branch into $name."
 
         git switch -c pushdown "$branch"
-        local dir=$(mktemp -d tmp.XXXX)
-        local moved_something="false"
+        dir=$(mktemp -d tmp.XXXX)
+        moved_something="false"
         for f in * .*; do
             if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
                 git mv "$f" "$dir"
