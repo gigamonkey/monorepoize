@@ -13,7 +13,7 @@ function ensure_repo_dir {
     dir="$1"
 
     if [ -d "$dir" ]; then
-        echo "$dir alread exists."
+        echo "$dir already exists."
         exit 1
     else
         mkdir -p "$dir"
