@@ -83,7 +83,7 @@ of you repo (which you shouldn`t if you just built it).
 ```
 git tag --list > tags.txt
 split -l 100 tags.txt tags-
-for f in tags-??; do git push origin $(cat $f); done
+for f in tags-*; do git push origin $(cat $f); done
 rm tags-*
 rm tags.txt
 ```
