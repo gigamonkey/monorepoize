@@ -4,4 +4,4 @@ set -e
 
 source monorepo.sh
 
-pusdown "$1"
+pushdown "$1"
