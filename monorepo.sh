@@ -77,6 +77,7 @@ function pushdown {
             echo "Pushing $b into $dir."
 
             git switch -c pushdown "$b"
+
             tmpdir=$(mktemp -d tmp.XXXX)
             moved_something="false"
             for f in * .*; do
@@ -85,15 +86,14 @@ function pushdown {
                     moved_something="true"
                 fi
             done
-            mkdir -p "$(dirname "$dir")"
+
             if [ "$moved_something" == "true" ]; then
+                mkdir -p "$(dirname "$dir")"
                 git mv "$tmpdir" "$dir"
+                git commit -m "Moving $dir to subdir in $branch."
             else
-                mv "$tmpdir" "$dir"
-                echo "No files in $b." > "$dir/empty-branch.txt"
-                git add "$dir/empty-branch.txt"
+                rmdir "$tmpdir"
             fi
-            git commit --allow-empty -m "Moving $dir to subdir in $branch."
             git checkout "$branch"
             git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $b to $branch." pushdown
             git branch -d pushdown
