@@ -22,6 +22,21 @@ function ensure_repo_dir {
     fi
 }
 
+function ensure_branch {
+
+    local branch
+
+    branch="$1"
+
+    if git show-ref --verify --quiet refs/heads/"$branch"; then
+        git switch "$branch"
+    else
+        git switch --orphan "$branch"
+        git commit --allow-empty -m "Creating combined $branch."
+        sleep 1
+    fi
+}
+
 function incorporate {
     local name url before after
 
@@ -40,51 +55,51 @@ function incorporate {
     echo "After incorporating $name $((after - before)) changes."
 }
 
+#
+# Push down the contents of all branches with the same base name (e.g.
+# proj1/master, proj2/master) into a new branch with just that base
+# name with each project in its own subdirectory.
+#
 function pushdown {
 
-    local branch name dir moved_something
+    local branch moved_something
 
-    branch=$1
-    name=${branch%%/*}
+    branch=$1 # e.g. master
 
-    if [ -n "$(git show-ref "$branch")" ]; then
+    ensure_branch "$branch"
 
-        echo "Pushing $branch into $name."
+    git show-ref --heads "$branch" | cut -c 53- | while read -r b; do
 
-        git switch -c pushdown "$branch"
-        dir=$(mktemp -d tmp.XXXX)
-        moved_something="false"
-        for f in * .*; do
-            if [[ "$f" != .git && "$f" != "$dir" && "$f" != "." && "$f" != ".." ]]; then
-                git mv "$f" "$dir"
-                moved_something="true"
+        if [ "$b" != "$branch" ]; then
+
+            local dir=${b%%/"$branch"}
+
+            echo "Pushing $b into $dir."
+
+            git switch -c pushdown "$b"
+            tmpdir=$(mktemp -d tmp.XXXX)
+            moved_something="false"
+            for f in * .*; do
+                if [[ "$f" != .git && "$f" != "$tmpdir" && "$f" != "." && "$f" != ".." ]]; then
+                    git mv "$f" "$tmpdir"
+                    moved_something="true"
+                fi
+            done
+            mkdir -p "$(dirname "$dir")"
+            if [ "$moved_something" == "true" ]; then
+                git mv "$tmpdir" "$dir"
+            else
+                mv "$tmpdir" "$dir"
+                echo "No files in $b." > "$dir/empty-branch.txt"
+                git add "$dir/empty-branch.txt"
             fi
-        done
-        if [ "$moved_something" == "true" ]; then
-            git mv "$dir" "$name"
-        else
-            mv "$dir" "$name"
-            echo "No files in $branch." > "$name/empty-branch.txt"
-            git add "$name/empty-branch.txt"
+            git commit --allow-empty -m "Moving $dir to subdir in $branch."
+            git checkout "$branch"
+            git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $b to $branch." pushdown
+            git branch -d pushdown
         fi
-        git commit --allow-empty -m "Moving $name to subdir."
-        git checkout master
-        git merge --allow-unrelated-histories -s recursive -X no-renames --no-ff -m "Merging $name to master." pushdown
-        git branch -d pushdown
-    else
-        echo "No branch $branch to merge into master."
-        mkdir -p "$name"
-        if git show-ref | grep "refs/heads/$name" > "$name/no-branch.txt"; then
-            git add "$name/no-branch.txt"
-        else
-            rm "$name/no-branch.txt"
-            touch "$name/empty-repo.txt"
-            git add "$name/empty-repo.txt"
+    done
 
-        fi
-        git commit --allow-empty -m "Creating placeholder subdir $name."
-    fi
-
-    echo "Done pushing $branch into $name."
+    echo "Done pushing $branch."
     sleep 1
 }

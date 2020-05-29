@@ -1,7 +1,17 @@
 #!/bin/bash
 
+#
+# With a repo already made, push down all branches with a given base
+# name (e.g. master or staging or whatever) into a new branch with
+# just that name.
+#
+
 set -e
 
 source monorepo.sh
 
-pushdown "$1"
+repo="$1"
+branch="$2"
+
+cd "$repo"
+pushdown "$branch"

@@ -19,5 +19,6 @@ while read -r repo; do
     name=${name%.git}
     echo "Incorporating $name ..."
     incorporate "$name" "$repo"
-    pushdown "$name/$branch"
 done < "$input"
+
+pushdown "$branch"
