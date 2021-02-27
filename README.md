@@ -28,11 +28,11 @@ Additionally the contents of `master` branch from each sub-repo will be added in
   merge them to `master`.
 
 
-# Pushing to github
+# Pushing to GitHub
 
-After you've built your monorepo, you'll probably want to push hit to
-github. In the normal case you can probably just create a repo on
-Github and then do the normal:
+After you've built your monorepo, you'll probably want to push it to
+GitHub. In the normal case you can probably just create a repo on
+GitHub and then do the normal:
 
 ```
 git remote add origin git@github.com:<whatever>
