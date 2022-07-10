@@ -86,7 +86,7 @@ git push --all origin
 
 to push all the objects and branches.
 
-If trying to push with `--tags` fails, you may need to push fewer tags
+If the `git push --tags origin` fails, you may need to push fewer tags
 at a time. Here's a way to do that assuming you don't already have
 files named `tags.txt` or starting with `tags-` in the root directory
 of you repo (which you shouldn`t if you just built it).
