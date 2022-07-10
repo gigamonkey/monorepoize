@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -e
+
+source "$(dirname $0)/monorepo.sh"
+
+here=$(pwd)
+
+repo="$1"
+branch=${2:-main}
+
+# Assume we are already in the repository we are adding to.
+
+# Accept either github URLs or a path to a bare repo .git directory.
+if [ "${repo:0:15}" != "git@github.com:" ]; then
+    repo=$(cd "$here"; realpath "$repo")
+fi
+name=${repo##*/}
+name=${name%.git}
+echo "Incorporating $name ..."
+
+incorporate "$name" "$repo"
+pushdown_one "$branch" "$name/$branch"
