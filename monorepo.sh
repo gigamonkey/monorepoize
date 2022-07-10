@@ -61,10 +61,11 @@ function incorporate {
 # project in its own subdirectory. When creating a monorepo we do this for the
 # default branch, e.g. main but this function could be used after the fact to
 # create another unified branch. (For instance, if some of the incorporated
-# repos used master instead of main you could pushdown master and then merge
-# that one branch into the monorepo's main. Obviously if some repos had both
-# master and main, that might cause a non-trivial merge but creating the
-# pushdown branch should be fine.)
+# repos used prod instead of main you could pushdown prod and then merge that
+# one branch into the monorepo's main. Obviously if some repos had both prod and
+# main, that might cause a non-trivial merge but creating the pushdown branch
+# should be fine. See the script pushdown for an easy way to invoke this
+# function.)
 #
 function pushdown {
 

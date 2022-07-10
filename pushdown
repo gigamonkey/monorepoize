@@ -2,8 +2,8 @@
 
 #
 # With a repo already made, push down all branches with a given base
-# name (e.g. master or staging or whatever) into a new branch with
-# just that name.
+# name (e.g. main or staging or whatever) into a new branch with just
+# that name.
 #
 
 set -e

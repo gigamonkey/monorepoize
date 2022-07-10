@@ -10,9 +10,10 @@ subrepo is `foo.git` and it contains a branch `whatever`, in the
 monorepo the SHA pointed to by the branch `whatever` in the original
 repo will now be pointed to by a branch named `foo/whatever`.
 
-Additionally the contents of `master` branch from each sub-repo will
-be added in a subdirectory named for the sub-repo and merged to the
-monorepo's `master` branch.
+Additionally the contents of `main` branch from each sub-repo will be
+added in a subdirectory named for the sub-repo and merged to the
+monorepo's `main` branch. (Or you can specify a different default
+branch as the second argument to the `build` script.)
 
 # To create a monorepo.
 
@@ -29,13 +30,13 @@ monorepo's `master` branch.
 - After the monorepo is built, look for `empty-repo.txt` and
   `no-branch.txt` files in the subdirectories. These are created if
   the repo incorporated had either no changes (`empty-repo.txt`) or no
-  `master` branch. In the latter case the `no-branch.txt` file will
+  `main` branch. In the latter case the `no-branch.txt` file will
   contain a list of the refs from the repo. If there's an appropriate
-  branch (say the repo used `prod` instead of `master`) you can fix
+  branch (say the repo used `prod` instead of `main`) you can fix
   things up with the `pushdown` script. In the monorepo remove the
   `no-branch.txt` and then run `./pushdown foo/prod` to put the
   contents of the `foo/prod` branch into the `foo` subdirectory and
-  merge them to `master`.
+  merge them to `main`.
 
 
 # Pushing to GitHub
@@ -59,25 +60,25 @@ However, if you made a really big repo, you might get an error about
 pack files or something when you try to push. This probably means your
 repo is too big to push in one go. To get around that just push
 specific branches one at a time. Because your repo was built from
-smaller repos one good thing to try is pushing the original master
+smaller repos one good thing to try is pushing the original main
 branch from each sub repo. For example within the repo you could make
-a list of all the `master` branches (except the main master which
+a list of all the `main` branches (except the top-level main which
 would drag in almost everything at once) with this command.
 
 ```
-git branch | grep master | cut -c 3- | egrep -v '^master$' > masters.txt
+git branch | grep main | cut -c 3- | egrep -v '^main$' > mains.txt
 ```
 
 
 Then use the `slow_push` script to push one branch at a time:
 
 ```
-cat masters.txt | ./slow_push
+cat mains.txt | ./slow_push
 ```
 
 This might not push everything (if there were branches in the sub
-repos that never got merged to master) but it should get most things
-so that you can then do a:
+repos that never got merged to main) but it should get most things so
+that you can then do a:
 
 ```
 git push --all origin

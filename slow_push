@@ -11,8 +11,8 @@
 # standard in.
 #
 # If, for instance, you have made a monorepo out of a bunch of other
-# repos, you could push the master branch of each sub-repo separately
-# as each sub-repo is likely small enough to be pushed in one go.
+# repos, you could push the main branch of each sub-repo separately as
+# each sub-repo is likely small enough to be pushed in one go.
 
 set -ex
 
