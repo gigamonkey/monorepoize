@@ -24,8 +24,8 @@ branch as the second argument to the `build` script.)
   monorepo you want to create.
 
 - Run `./build something.repos`. It will create a directory named
-  `something` and incorporate all the repos listed in the `.repos`
-  file.
+  `something` and incorporate all the repos listed in the
+  `something.repos` file.
 
 - After the monorepo is built, look for `empty-repo.txt` and
   `no-branch.txt` files in the subdirectories. These are created if
