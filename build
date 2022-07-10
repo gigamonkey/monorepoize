@@ -2,11 +2,33 @@
 
 set -e
 
+case "$1" in
+    -h|-help|--help)
+        cat <<EOF
+Build a monorepo from multiple existing repos.
+
+Usage: build REPOSFILE [DEFAULT_BRANCH]
+
+REPOSFILE should be named foo.repos where foo is the name of the directory to
+build the monoropo in and should contain either github URLs or paths to bare
+repo's .git directories, one per line.
+
+BRANCH is the branch name that will be created as the main branch in the mono
+repo. Defaults to 'main'. All other branches from incorporated repos will be
+mapped to new branchs in the monorepo.
+
+EOF
+        exit 0
+        ;;
+esac
+
+
+
 source "$(dirname $0)/monorepo.sh"
 
 here=$(pwd)
 input=$(realpath "$1")
-branch=${2:-master}
+branch=${2:-main}
 
 ensure_repo_dir "$(basename "$1" .repos)"
 
