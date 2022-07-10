@@ -8,9 +8,9 @@ requests = "*"
 
 [dev-packages]
 autoflake = "*"
-black = "==19.3b0"
+black = "*"
 flake8 = "*"
 isort = "*"
 
 [requires]
-python_version = "3.7"
+python_version = "3.10"
