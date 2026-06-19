@@ -5,6 +5,7 @@ set -ex
 function init_monorepo {
     git init
     git commit --allow-empty -m "Creating combined repo."
+    git config core.ignorecase false # preserve exact-case filenames across merged repos (built on Mac, used on Linux)
     sleep 1
 }
 
