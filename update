@@ -1,0 +1,269 @@
+#!/bin/bash
+#
+# Fold commits made to a source repo AFTER the monorepo was built back into the
+# monorepo, preserving history -- the maintenance companion to `add`.
+#
+# monorepoize keeps each source repo as a <name>/<branch> branch (its original
+# history and SHAs) and lays that branch's content under a <name>/ subdirectory
+# on the monorepo's default branch. So updating one repo is two steps:
+#   1. fetch the upstream repo's new commits onto the <name>/<branch> branch
+#      (original SHAs preserved, exactly like incorporate), and
+#   2. replay just those new commits onto the <name>/ subdir of the default
+#      branch with `git format-patch | git am --directory=<name>`, which keeps
+#      each commit's message, author, and date.
+#
+# The upstream URL for each repo is read from the committed .monorepoize/sources
+# file that build/add records. Override a single repo with --upstream, or point
+# at a .repos file with --repos.
+#
+# Run it against a local clone of the monorepo (it mutates that clone); push the
+# result back with --push, or yourself afterward.
+#
+# Assumes the new upstream commits are a linear extension of what's already in
+# the monorepo (format-patch/am don't replay merge commits); repos whose range
+# contains a merge are skipped/refused.
+
+source "$(dirname "$0")/monorepo.sh"
+set +x   # monorepo.sh enables command tracing; this command stays quiet.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] MONOREPO [NAME]
+
+Pull new upstream commits into the monorepo at MONOREPO (a local clone): one
+repo NAME, or every repo with --all. Updates each repo's <name>/<branch> branch
+and its <name>/ subdir on the default branch.
+
+Arguments:
+  MONOREPO            Local clone of the monorepo (a writable git repo).
+  NAME               Repo name / subdirectory to update (omit with --all).
+
+Options:
+      --all           Update every repo in the monorepo. Raw git output is
+                      suppressed; you get one summary line per repo.
+  -u, --upstream URL  Source repo to pull from (single repo only). Overrides the
+                      URL recorded in .monorepoize/sources.
+      --repos FILE    A .repos file (one source URL per line) to resolve upstream
+                      URLs from, matching each repo by URL basename.
+  -b, --branch BR     Upstream branch to track (default: auto-detect main/master).
+  -n, --dry-run       Show what would be applied; change nothing.
+      --push          Push the updated default branch and per-repo refs to origin.
+  -h, --help          Show this help.
+EOF
+}
+
+UPSTREAM=""
+REPOS_FILE=""
+BRANCH=""
+DRYRUN=0
+PUSH=0
+ALL=0
+MONOREPO=""
+NAME=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u|--upstream) UPSTREAM="$2"; shift 2 ;;
+    --repos)       REPOS_FILE="$2"; shift 2 ;;
+    -b|--branch)   BRANCH="$2"; shift 2 ;;
+    -n|--dry-run)  DRYRUN=1; shift ;;
+    --push)        PUSH=1; shift ;;
+    --all)         ALL=1; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)
+      if [ -z "$MONOREPO" ]; then MONOREPO="$1"
+      elif [ -z "$NAME" ]; then NAME="$1"
+      else echo "Error: unexpected argument: $1" >&2; usage >&2; exit 1
+      fi
+      shift ;;
+  esac
+done
+
+die() { echo "Error: $*" >&2; exit 1; }
+
+[ -n "$MONOREPO" ] || { echo "Error: no MONOREPO given" >&2; usage >&2; exit 1; }
+[ -d "$MONOREPO/.git" ] || die "$MONOREPO is not a git repo (point at a local clone of the monorepo)"
+
+if [ "$ALL" -eq 1 ]; then
+  [ -z "$NAME" ]     || die "don't pass NAME with --all"
+  [ -z "$UPSTREAM" ] || die "--upstream can't be combined with --all (use --repos or .monorepoize/sources)"
+else
+  [ -n "$NAME" ] || { echo "Error: no NAME given (or use --all)" >&2; usage >&2; exit 1; }
+fi
+
+if [ -n "$REPOS_FILE" ]; then
+  [ -f "$REPOS_FILE" ] || die "--repos file not found: $REPOS_FILE"
+  REPOS_FILE=$(cd "$(dirname "$REPOS_FILE")" && pwd)/$(basename "$REPOS_FILE")
+fi
+
+cd "$MONOREPO"
+git diff --quiet && git diff --cached --quiet || die "working tree has uncommitted changes; commit or stash first"
+
+# Suppress raw git output in --all mode; let it through for a single repo.
+QUIET="$ALL"
+gq() { if [ "$QUIET" -eq 1 ]; then git "$@" >/dev/null 2>&1; else git "$@"; fi; }
+
+# Prints the first of its argument refs that exists (full refname); else fails.
+resolve_ref() {
+  local r
+  for r in "$@"; do
+    if git rev-parse --verify --quiet "$r" >/dev/null; then printf '%s' "$r"; return 0; fi
+  done
+  return 1
+}
+
+# Monorepo's default branch.
+mono_main_ref=$(resolve_ref refs/heads/main refs/heads/master) \
+  || die "monorepo has no 'main' or 'master' branch"
+MONO_MAIN=${mono_main_ref#refs/heads/}
+
+# Source URLs recorded by build/add, read from the committed default-branch file.
+SOURCES=$(git show "$MONO_MAIN:.monorepoize/sources" 2>/dev/null || true)
+
+# Resolve the upstream URL for a repo: explicit --upstream wins, then a --repos
+# file (matched by URL basename), then the recorded .monorepoize/sources. Prints
+# the URL and returns 0, or returns 1 if none is known.
+upstream_for() {
+  local name="$1" url="" line b
+  if [ -n "$UPSTREAM" ]; then printf '%s' "$UPSTREAM"; return 0; fi
+  if [ -n "$REPOS_FILE" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      b=${line##*/}; b=${b%.git}
+      if [ "$b" = "$name" ]; then printf '%s' "$line"; return 0; fi
+    done < "$REPOS_FILE"
+  fi
+  if [ -n "$SOURCES" ]; then
+    url=$(printf '%s\n' "$SOURCES" | awk -v n="$name" '$1 == n { print $2; exit }')
+    [ -n "$url" ] && { printf '%s' "$url"; return 0; }
+  fi
+  return 1
+}
+
+# Update one repo. Sets _status (nobranch|nourl|missing|uptodate|merges|pending|
+# updated|conflict) and _count; prints nothing; never exits.
+update_one() {
+  local name="$1" upstream br src_ref oldtip newtip merges peek=0
+  _status=""; _count=0
+
+  br=""; src_ref=""
+  local b
+  for b in ${BRANCH:-main master}; do
+    if src_ref=$(resolve_ref "refs/heads/$name/$b" "refs/remotes/origin/$name/$b"); then br="$b"; break; fi
+  done
+  if [ -z "$src_ref" ]; then _status="nobranch"; return 0; fi
+  oldtip=$(git rev-parse "$src_ref")
+
+  if ! upstream=$(upstream_for "$name"); then _status="nourl"; return 0; fi
+
+  if [ "$DRYRUN" -eq 1 ]; then
+    if ! gq fetch --quiet "$upstream" "refs/heads/$br:refs/__update_peek"; then _status="missing"; return 0; fi
+    newtip=$(git rev-parse refs/__update_peek); peek=1
+  else
+    if ! gq fetch --quiet --no-tags "$upstream" "+refs/heads/*:refs/heads/$name/*"; then _status="missing"; return 0; fi
+    gq fetch --quiet "$upstream" "+refs/tags/*:refs/tags/$name/*" || true
+    newtip=$(git rev-parse "refs/heads/$name/$br")
+  fi
+
+  if [ "$oldtip" = "$newtip" ]; then
+    _status="uptodate"
+    [ "$peek" -eq 1 ] && { git update-ref -d refs/__update_peek >/dev/null 2>&1 || true; }
+    return 0
+  fi
+
+  merges=$(git rev-list --merges --count "$oldtip..$newtip")
+  _count=$(git rev-list --count "$oldtip..$newtip")
+  [ "$peek" -eq 1 ] && { git update-ref -d refs/__update_peek >/dev/null 2>&1 || true; }
+
+  if [ "$merges" -ne 0 ]; then _status="merges"; return 0; fi
+  if [ "$DRYRUN" -eq 1 ]; then _status="pending"; return 0; fi
+
+  gq checkout --quiet "$MONO_MAIN"
+  if [ "$QUIET" -eq 1 ]; then
+    if git format-patch --stdout "$oldtip..$newtip" 2>/dev/null | git am --3way --directory="$name" >/dev/null 2>&1; then
+      _status="updated"
+    else
+      git am --abort >/dev/null 2>&1 || true; _status="conflict"
+    fi
+  else
+    if git format-patch --stdout "$oldtip..$newtip" | git am --3way --directory="$name"; then
+      _status="updated"
+    else
+      git am --abort >/dev/null 2>&1 || true; _status="conflict"
+    fi
+  fi
+}
+
+########################################################################
+# Single repo
+########################################################################
+if [ "$ALL" -eq 0 ]; then
+  echo "Updating '$NAME' in $MONOREPO ..." >&2
+  update_one "$NAME"
+  case "$_status" in
+    nobranch) die "no '$NAME/${BRANCH:-main|master}' branch in this monorepo; was it built/cloned with the per-repo branches?" ;;
+    nourl)    die "no upstream URL known for '$NAME'; pass -u URL, or --repos FILE, or rebuild so .monorepoize/sources is recorded" ;;
+    missing)  die "could not fetch the upstream for '$NAME' (deleted, or unreachable); pass -u to point at it" ;;
+    merges)   die "the upstream range for '$NAME' has merge commit(s); this only handles linear history" ;;
+    uptodate) echo "Already up to date." >&2; exit 0 ;;
+    pending)  echo "$_count new commit(s) for '$NAME' (dry run — nothing changed)." >&2; exit 0 ;;
+    conflict) die "could not apply '$NAME' cleanly under $NAME/ (conflicts). Its branch was updated; $MONO_MAIN left unchanged. Resolve by hand." ;;
+    updated)  echo "Applied $_count commit(s) under $NAME/ on $MONO_MAIN." >&2 ;;
+  esac
+
+  if [ "$PUSH" -eq 1 ]; then
+    echo "Pushing $MONO_MAIN and $NAME/* to origin ..." >&2
+    git push origin "$MONO_MAIN"
+    git push origin "refs/heads/$NAME/*:refs/heads/$NAME/*"
+    if git for-each-ref --format='x' "refs/tags/$NAME/*" | grep -q x; then
+      git push origin "refs/tags/$NAME/*:refs/tags/$NAME/*"
+    fi
+    echo "Pushed." >&2
+  fi
+  exit 0
+fi
+
+########################################################################
+# --all
+########################################################################
+repos=$(constituent_names .)
+[ -n "$repos" ] || die "no per-repo branches found in this monorepo"
+total=$(printf '%s\n' "$repos" | grep -c .)
+if [ "$DRYRUN" -eq 1 ]; then
+  echo "Checking $total repo(s) in $MONOREPO for upstream changes ..." >&2
+else
+  echo "Updating $total repo(s) in $MONOREPO ..." >&2
+fi
+echo >&2
+
+n_changed=0 n_commits=0 n_uptodate=0 n_missing=0 n_skipped=0
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  update_one "$name"
+  case "$_status" in
+    missing)  printf '  %-30s %s\n' "$name" "UPSTREAM MISSING" >&2; n_missing=$((n_missing + 1)) ;;
+    nourl)    printf '  %-30s %s\n' "$name" "no upstream URL — skipped" >&2; n_skipped=$((n_skipped + 1)) ;;
+    uptodate) printf '  %-30s %s\n' "$name" "up to date" >&2; n_uptodate=$((n_uptodate + 1)) ;;
+    merges)   printf '  %-30s %s\n' "$name" "$_count new, has merges — skipped" >&2; n_skipped=$((n_skipped + 1)) ;;
+    conflict) printf '  %-30s %s\n' "$name" "CONFLICT — skipped" >&2; n_skipped=$((n_skipped + 1)) ;;
+    nobranch) printf '  %-30s %s\n' "$name" "no per-repo branch — skipped" >&2; n_skipped=$((n_skipped + 1)) ;;
+    pending)  printf '  %-30s %s\n' "$name" "$_count new commit(s)" >&2; n_changed=$((n_changed + 1)); n_commits=$((n_commits + _count)) ;;
+    updated)  printf '  %-30s %s\n' "$name" "updated ($_count commit(s))" >&2; n_changed=$((n_changed + 1)); n_commits=$((n_commits + _count)) ;;
+  esac
+done <<< "$repos"
+
+echo >&2
+if [ "$DRYRUN" -eq 1 ]; then
+  echo "$total repo(s): $n_changed with updates ($n_commits commit(s)), $n_uptodate up to date, $n_missing upstream missing, $n_skipped skipped." >&2
+  exit 0
+fi
+echo "$total repo(s): updated $n_changed ($n_commits commit(s)), $n_uptodate up to date, $n_missing upstream missing, $n_skipped skipped." >&2
+
+if [ "$PUSH" -eq 1 ] && [ "$n_changed" -gt 0 ]; then
+  echo "Pushing all branches and tags to origin ..." >&2
+  git push --quiet origin --all
+  git push --quiet origin --tags
+  echo "Pushed." >&2
+fi

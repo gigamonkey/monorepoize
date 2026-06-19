@@ -1,0 +1,160 @@
+#!/bin/bash
+#
+# Pull one original repo back OUT of a monorepo built by monorepoize -- the
+# inverse of combining. Give it the monorepo (a local path or a git URL) and the
+# name of a top-level subdirectory; you get a standalone repo with that repo's
+# original history: every original branch and tag, with their original commit
+# SHAs and the original root-level file layout.
+#
+# This works because monorepoize preserves each incorporated repo as branches
+# named "<name>/<branch>" and tags named "<name>/<tag>" (same SHAs as the
+# source). We just fetch those refs back with the "<name>/" prefix stripped. No
+# history rewriting -- the extracted commits are byte-for-byte the originals.
+#
+# NOTE: this needs the monorepo to actually contain those per-repo branches. If
+# the monorepo was pushed to a remote with only its default branch (no `git push
+# --all`), the per-repo history isn't there to recover. The script detects this
+# and tells you.
+
+source "$(dirname "$0")/monorepo.sh"
+set +x   # monorepo.sh enables command tracing; this command stays quiet.
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] MONOREPO DIR
+
+Extract the original repo for top-level subdirectory DIR out of the monorepo at
+MONOREPO (a local path or a git URL), with its original history.
+
+Options:
+  -o, --output PATH   Where to write the result. Without --bundle, the extracted
+                      repo directory [default: ./<DIR>]; with --bundle, the
+                      bundle file [default: ./<DIR>.bundle].
+      --bundle        Produce just a single-file bundle (no working repo left
+                      behind): 'git clone <DIR>.bundle' restores it.
+      --push URL      After extracting, push --all and --tags to URL (e.g. a
+                      freshly created empty remote repo).
+  -h, --help          Show this help.
+EOF
+}
+
+OUTPUT=""
+BUNDLE=0
+PUSH=""
+MONOREPO=""
+DIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) OUTPUT="$2"; shift 2 ;;
+    --bundle)    BUNDLE=1; shift ;;
+    --push)      PUSH="$2"; shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)
+      if [ -z "$MONOREPO" ]; then MONOREPO="$1"
+      elif [ -z "$DIR" ]; then DIR="$1"
+      else echo "Error: unexpected argument: $1" >&2; usage >&2; exit 1
+      fi
+      shift ;;
+  esac
+done
+
+die() { echo "Error: $*" >&2; exit 1; }
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+[ -n "$MONOREPO" ] || { echo "Error: no MONOREPO given" >&2; usage >&2; exit 1; }
+[ -n "$DIR" ]      || { echo "Error: no DIR given" >&2; usage >&2; exit 1; }
+
+if [ "$BUNDLE" -eq 1 ]; then
+  OUTPUT="${OUTPUT:-./$DIR.bundle}"
+else
+  OUTPUT="${OUTPUT:-./$DIR}"
+fi
+[ -e "$OUTPUT" ] && die "output path already exists: $OUTPUT (remove it or pass -o)"
+
+# Absolutize a local path so the later `git -C <workdir> fetch` (which resolves
+# relative paths against the work dir, not our cwd) finds it. URLs are untouched.
+if [ -d "$MONOREPO" ]; then MONOREPO=$(cd "$MONOREPO" && pwd); fi
+
+echo "Looking for '$DIR' history in $MONOREPO ..." >&2
+
+# Validate we can read the monorepo, then resolve the actual (case-correct)
+# prefix that matches DIR among its constituent repo names.
+git ls-remote --heads "$MONOREPO" >/dev/null 2>&1 \
+  || die "could not read $MONOREPO (bad URL/path or no access)"
+
+want=$(lc "$DIR")
+prefix=""
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  if [ "$(lc "$name")" = "$want" ]; then prefix="$name"; break; fi
+done <<< "$(constituent_names "$MONOREPO")"
+
+if [ -z "$prefix" ]; then
+  die "no per-repo branches found for '$DIR' in this monorepo.
+  The monorepo must contain branches named '$DIR/<branch>' (created by
+  monorepoize). If it was pushed with only its default branch, re-push it with
+  'git push --all && git push --tags' so the per-repo history is available."
+fi
+
+echo "Found prefix '$prefix'. Extracting its branches and tags ..." >&2
+
+# Work in the output dir itself, or a temp repo when we only want a bundle file.
+if [ "$BUNDLE" -eq 1 ]; then
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/extract.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT
+else
+  WORK="$OUTPUT"
+fi
+
+# Build the standalone repo by fetching the namespaced refs back with the prefix
+# stripped. Original SHAs are preserved exactly.
+git init -q "$WORK"
+# Point HEAD at an unborn placeholder branch so that fetching a source branch
+# named like the init default (e.g. 'main') can't trip "refusing to fetch into
+# the currently checked-out branch". We check out the real default below.
+git -C "$WORK" symbolic-ref HEAD refs/heads/__extracting__
+git -C "$WORK" fetch -q --no-tags "$MONOREPO" "refs/heads/$prefix/*:refs/heads/*"
+git -C "$WORK" fetch -q --no-tags "$MONOREPO" "refs/tags/$prefix/*:refs/tags/*" 2>/dev/null || true
+
+branches=$(git -C "$WORK" for-each-ref --format='%(refname:short)' refs/heads/)
+[ -n "$branches" ] || die "fetched no branches for '$prefix' (unexpected)"
+
+# Pick a sensible default branch to check out: main, else master, else first.
+default=""
+for cand in main master; do
+  if git -C "$WORK" show-ref --verify --quiet "refs/heads/$cand"; then default="$cand"; break; fi
+done
+[ -n "$default" ] || default=$(printf '%s\n' "$branches" | head -1)
+git -C "$WORK" checkout -q -f "$default"
+git -C "$WORK" symbolic-ref HEAD "refs/heads/$default"
+
+n_branches=$(printf '%s\n' "$branches" | grep -c . || true)
+n_tags=$(git -C "$WORK" tag | grep -c . || true)
+tip=$(git -C "$WORK" rev-parse --short HEAD)
+
+# Push from the working repo before we (maybe) discard it.
+if [ -n "$PUSH" ]; then
+  echo "Pushing to $PUSH ..." >&2
+  git -C "$WORK" push "$PUSH" --all
+  git -C "$WORK" push "$PUSH" --tags
+  echo "Pushed all branches and tags to $PUSH" >&2
+fi
+
+echo >&2
+if [ "$BUNDLE" -eq 1 ]; then
+  # Resolve OUTPUT to an absolute path so the bundle lands where the user
+  # expects -- not inside $WORK (git -C would resolve a relative path there).
+  mkdir -p "$(dirname "$OUTPUT")"
+  out_abs="$(cd "$(dirname "$OUTPUT")" && pwd)/$(basename "$OUTPUT")"
+  git -C "$WORK" bundle create "$out_abs" --all >/dev/null
+  echo "Bundled '$DIR' -> $OUTPUT" >&2
+  echo "  $n_branches branch(es), $n_tags tag(s); default $default @ $tip" >&2
+  echo "  recipient: git clone $(basename "$OUTPUT")" >&2
+else
+  echo "Extracted '$DIR' -> $OUTPUT" >&2
+  echo "  default branch: $default @ $tip" >&2
+  echo "  branches: $n_branches    tags: $n_tags" >&2
+fi

@@ -37,6 +37,56 @@ function ensure_branch {
     fi
 }
 
+#
+# Print the names of the constituent repos in a monorepo, one per line, unique.
+# MONO may be a local path or a git URL. Each incorporated repo contributes
+# branches named "<name>/<branch>" (and tags "<name>/<tag>"), so the name is the
+# first path segment of each namespaced branch. The un-namespaced default branch
+# (main/master) and HEAD have no namespace and are skipped. For a local clone we
+# also look at origin remote-tracking refs, since a fresh `git clone` keeps the
+# per-repo branches under refs/remotes/origin/ rather than refs/heads/.
+#
+function constituent_names {
+    local mono ref b
+    mono=$1
+    {
+        git ls-remote --heads "$mono" 2>/dev/null | while read -r _ ref; do
+            printf '%s\n' "${ref#refs/heads/}"
+        done
+        if git -C "$mono" rev-parse --git-dir >/dev/null 2>&1; then
+            git -C "$mono" for-each-ref --format='%(refname:short)' refs/remotes/origin/ 2>/dev/null \
+                | while read -r b; do printf '%s\n' "${b#origin/}"; done
+        fi
+    } 2>/dev/null | while read -r b; do
+        case "$b" in
+            HEAD) ;;
+            */*) printf '%s\n' "${b%%/*}" ;;
+        esac
+    done | sort -u
+    return 0
+}
+
+#
+# Record (upsert) the source URL a repo was incorporated from in a committed
+# .monorepoize/sources file, so `update` (and any future tooling) can find the
+# upstream with no extra input. One "name url" line per repo. This only stages
+# the file; the caller commits (build records several at once, add records one).
+#
+function stage_source {
+    local name url dir file
+    name=$1
+    url=$2
+    dir=".monorepoize"
+    file="$dir/sources"
+    mkdir -p "$dir"
+    if [ -f "$file" ]; then
+        awk -v n="$name" '$1 != n' "$file" > "$file.tmp"
+        mv "$file.tmp" "$file"
+    fi
+    printf '%s %s\n' "$name" "$url" >> "$file"
+    git add "$file"
+}
+
 function incorporate {
     local name url before after
 
