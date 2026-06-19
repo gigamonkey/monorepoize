@@ -13,8 +13,11 @@
 #      each commit's message, author, and date.
 #
 # The upstream URL for each repo is read from the committed .monorepoize/sources
-# file that build/add records. Override a single repo with --upstream, or point
-# at a .repos file with --repos.
+# file that build/add records. Override a single repo with --upstream, point at a
+# .repos file with --repos, or, when every repo is eponymous and lives on the
+# same origin as the monorepo, derive URLs from the monorepo's own origin with
+# --same-origin (the monorepo's origin URL with its last path segment replaced by
+# <name>.git).
 #
 # Run it against a local clone of the monorepo (it mutates that clone); push the
 # result back with --push, or yourself afterward.
@@ -46,6 +49,10 @@ Options:
                       URL recorded in .monorepoize/sources.
       --repos FILE    A .repos file (one source URL per line) to resolve upstream
                       URLs from, matching each repo by URL basename.
+      --same-origin   Derive each upstream from the monorepo's own origin: the
+                      origin URL with its last path segment replaced by <name>.git
+                      (only valid when the repos are eponymous and on that origin).
+                      Used as a fallback when no URL is otherwise known.
   -b, --branch BR     Upstream branch to track (default: auto-detect main/master).
   -n, --dry-run       Show what would be applied; change nothing.
       --push          Push the updated default branch and per-repo refs to origin.
@@ -55,6 +62,7 @@ EOF
 
 UPSTREAM=""
 REPOS_FILE=""
+SAME_ORIGIN=0
 BRANCH=""
 DRYRUN=0
 PUSH=0
@@ -66,6 +74,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -u|--upstream) UPSTREAM="$2"; shift 2 ;;
     --repos)       REPOS_FILE="$2"; shift 2 ;;
+    --same-origin) SAME_ORIGIN=1; shift ;;
     -b|--branch)   BRANCH="$2"; shift 2 ;;
     -n|--dry-run)  DRYRUN=1; shift ;;
     --push)        PUSH=1; shift ;;
@@ -122,9 +131,17 @@ MONO_MAIN=${mono_main_ref#refs/heads/}
 # Source URLs recorded by build/add, read from the committed default-branch file.
 SOURCES=$(git show "$MONO_MAIN:.monorepoize/sources" 2>/dev/null || true)
 
-# Resolve the upstream URL for a repo: explicit --upstream wins, then a --repos
-# file (matched by URL basename), then the recorded .monorepoize/sources. Prints
-# the URL and returns 0, or returns 1 if none is known.
+# Monorepo's own origin, used by --same-origin to derive eponymous upstreams.
+ORIGIN=$(git remote get-url origin 2>/dev/null || true)
+if [ "$SAME_ORIGIN" -eq 1 ] && [ -z "$ORIGIN" ]; then
+  die "--same-origin needs an 'origin' remote on the monorepo to derive upstream URLs"
+fi
+
+# Resolve the upstream URL for a repo, most authoritative source first: explicit
+# --upstream, then a --repos file (matched by URL basename), then the recorded
+# .monorepoize/sources, then the --same-origin heuristic (origin URL with its
+# last path segment replaced by <name>.git). Prints the URL and returns 0, or
+# returns 1 if none is known.
 upstream_for() {
   local name="$1" url="" line b
   if [ -n "$UPSTREAM" ]; then printf '%s' "$UPSTREAM"; return 0; fi
@@ -139,6 +156,7 @@ upstream_for() {
     url=$(printf '%s\n' "$SOURCES" | awk -v n="$name" '$1 == n { print $2; exit }')
     [ -n "$url" ] && { printf '%s' "$url"; return 0; }
   fi
+  if [ "$SAME_ORIGIN" -eq 1 ]; then printf '%s' "${ORIGIN%/*}/$name.git"; return 0; fi
   return 1
 }
 
@@ -204,7 +222,7 @@ if [ "$ALL" -eq 0 ]; then
   update_one "$NAME"
   case "$_status" in
     nobranch) die "no '$NAME/${BRANCH:-main|master}' branch in this monorepo; was it built/cloned with the per-repo branches?" ;;
-    nourl)    die "no upstream URL known for '$NAME'; pass -u URL, or --repos FILE, or rebuild so .monorepoize/sources is recorded" ;;
+    nourl)    die "no upstream URL known for '$NAME'; pass -u URL, --repos FILE, or --same-origin, or rebuild so .monorepoize/sources is recorded" ;;
     missing)  die "could not fetch the upstream for '$NAME' (deleted, or unreachable); pass -u to point at it" ;;
     merges)   die "the upstream range for '$NAME' has merge commit(s); this only handles linear history" ;;
     uptodate) echo "Already up to date." >&2; exit 0 ;;

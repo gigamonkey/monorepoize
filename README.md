@@ -94,6 +94,12 @@ Run it against a local clone of the monorepo (it mutates that clone):
   at a `.repos` file with `--repos FILE` (matched by URL basename) for
   monorepos built before sources were recorded.
 
+- `--same-origin` derives each upstream from the monorepo's own
+  `origin`: the origin URL with its last path segment replaced by
+  `<name>.git`. Use it only when every repo is eponymous and lives on
+  the same origin as the monorepo (e.g. the same GitHub org). It is a
+  fallback, tried after any recorded sources or `--repos` file.
+
 - `--all` updates every repo, printing one summary line each (and
   flagging any whose upstream has gone missing).
 
