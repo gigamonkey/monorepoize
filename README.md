@@ -61,7 +61,11 @@ originals.
 subdirectory (the repo name) to extract. By default it writes a
 standalone repo to `./DIR`.
 
-- `-o OUTPUT` writes somewhere else.
+- `-o OUTPUT` is the full path to write — it replaces `./DIR` entirely,
+  it is not a parent directory to put `DIR` inside. So `-o /tmp/foo`
+  creates the extracted repo *at* `/tmp/foo` (not `/tmp/foo/DIR`). With
+  `--bundle` it is the bundle file path instead (replacing the default
+  `./DIR.bundle`). The path must not already exist.
 
 - `--bundle` writes only a single-file git bundle (nothing else left
   behind); the recipient restores it with `git clone DIR.bundle`.
