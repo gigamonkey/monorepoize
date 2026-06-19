@@ -38,6 +38,85 @@ branch as the second argument to the `build` script.)
   contents of the `foo/prod` branch into the `foo` subdirectory and
   merge them to `main`.
 
+`build` (and `add`) also record where each repo came from in a
+committed `.monorepoize/sources` file (one `name url` line per repo).
+The `update` command (below) reads this to find each repo's upstream
+with no extra arguments.
+
+
+# Extracting a repo
+
+`extract` is the inverse of `build`/`add`: it pulls one original repo
+back out of a monorepo with its original history. Because monorepoize
+stored each repo as `name/<branch>` and `name/<tag>` with the original
+commit SHAs, extraction is just fetching those refs back with the
+`name/` prefix stripped — the extracted commits are byte-for-byte the
+originals.
+
+```
+./extract MONOREPO DIR [-o OUTPUT] [--bundle] [--push URL]
+```
+
+`MONOREPO` may be a local path or a git URL; `DIR` is the top-level
+subdirectory (the repo name) to extract. By default it writes a
+standalone repo to `./DIR`.
+
+- `-o OUTPUT` is the full path to write — it replaces `./DIR` entirely,
+  it is not a parent directory to put `DIR` inside. So `-o /tmp/foo`
+  creates the extracted repo *at* `/tmp/foo` (not `/tmp/foo/DIR`). With
+  `--bundle` it is the bundle file path instead (replacing the default
+  `./DIR.bundle`). The path must not already exist.
+
+- `--bundle` writes only a single-file git bundle (nothing else left
+  behind); the recipient restores it with `git clone DIR.bundle`.
+
+- `--push URL` pushes `--all` and `--tags` to a fresh remote.
+
+This needs the monorepo to actually contain the per-repo branches. If
+the monorepo was pushed to a remote with only its default branch (no
+`git push --all`), that history isn't there to recover; `extract` will
+tell you to re-push with `git push --all && git push --tags`.
+
+
+# Updating a repo with later upstream commits
+
+If a source repo gets new commits after the monorepo was built, `update`
+folds them back in, preserving history. It fetches the new commits onto
+the `name/<branch>` branch (original SHAs, exactly like `build`) and
+replays just the new commits onto the `name/` subdirectory of the
+default branch, keeping each commit's message, author, and date.
+
+Run it against a local clone of the monorepo (it mutates that clone):
+
+```
+./update MONOREPO NAME [options]
+./update MONOREPO --all
+```
+
+- The upstream URL for each repo comes from the committed
+  `.monorepoize/sources` file. Override one repo with `-u URL`, or point
+  at a `.repos` file with `--repos FILE` (matched by URL basename) for
+  monorepos built before sources were recorded.
+
+- `--same-origin` derives each upstream from the monorepo's own
+  `origin`: the origin URL with its last path segment replaced by
+  `<name>.git`. Use it only when every repo is eponymous and lives on
+  the same origin as the monorepo (e.g. the same GitHub org). It is a
+  fallback, tried after any recorded sources or `--repos` file.
+
+- `--all` updates every repo, printing one summary line each (and
+  flagging any whose upstream has gone missing).
+
+- `-n`/`--dry-run` reports how many new commits each repo has without
+  changing anything.
+
+- `--push` pushes the updated default branch and per-repo refs to
+  `origin` afterward.
+
+`update` only replays linear history; if a repo's new upstream commits
+include a merge it is refused (single repo) or skipped (`--all`), since
+the replay can't reproduce merge commits.
+
 
 # Pushing to GitHub
 

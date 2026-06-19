@@ -32,6 +32,7 @@ branch=${2:-main}
 
 ensure_repo_dir "$(basename "$1" .repos)"
 
+sources=""
 while read -r repo; do
     # Accept either github URLs or a path to a bare repo .git directory.
     if [ "${repo:0:15}" != "git@github.com:" ]; then
@@ -41,6 +42,13 @@ while read -r repo; do
     name=${name%.git}
     echo "Incorporating $name ..."
     incorporate "$name" "$repo"
+    sources+="$name $repo"$'\n'
 done < "$input"
 
 pushdown "$branch"
+
+# Record where each repo came from so `update` can pull later upstream commits.
+printf '%s' "$sources" | while read -r name repo; do
+    [ -n "$name" ] && stage_source "$name" "$repo"
+done
+git commit -q -m "Record source URLs."

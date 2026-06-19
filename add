@@ -21,3 +21,8 @@ echo "Incorporating $name ..."
 
 incorporate "$name" "$repo"
 pushdown_one "$branch" "$name/$branch"
+
+# Record where this repo came from so `update` can pull later upstream commits.
+git switch "$branch"
+stage_source "$name" "$repo"
+git commit -q -m "Record source URL for $name."
