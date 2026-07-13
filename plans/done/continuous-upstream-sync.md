@@ -349,3 +349,37 @@ per `CLAUDE.md`:
    mechanics" for details and the spike results.
 
 Nothing above remains open; the design is ready to implement.
+
+## Changes to the plan
+
+Implemented in commit `9a22fea`. Notable ways the implementation differs from
+the design above:
+
+- **Baseline establishment is automatic on first `--merge`, with no separate
+  `--establish-baseline` command.** The plan floated either; `update` just does
+  `git merge -s ours` when it detects the base isn't yet an ancestor of the
+  default branch (a diverged/replay-built repo being switched), and records the
+  mode/marker in the same step.
+
+- **Two separate marker files, not a column on `sources`.** `.monorepoize/modes`
+  (per-repo mode; absent = replay) and `.monorepoize/synced` (per-repo
+  last-integrated SHA), both via a shared `stage_kv` helper that generalizes the
+  old `stage_source`.
+
+- **The `synced` marker is folded into the merge commit itself** via
+  `git merge --no-commit` — so each merge-mode sync is a single 2-parent merge
+  commit that also records the new sync position (and on a single-repo conflict,
+  the marker is staged so the user's resolving commit records it). Replay mode
+  also gained a marker: on a legacy repo's first sync it seeds
+  `.monorepoize/synced` before integrating, which is what actually closes bug #3
+  (a first-run conflict can no longer strand). Replay is otherwise unchanged.
+
+- **The `merge-tree --write-tree` dry-run conflict predictor was NOT built.**
+  `-n/--dry-run` reports how many commits are pending (and, in replay mode,
+  whether the range contains merges) but does not predict whether the merge will
+  conflict. The core merge uses `git merge -X subtree=`; the `merge-tree`
+  plumbing remains an optional future enhancement (see `next-steps.md`).
+
+- **Tests drive the real commands.** `test/update-merge.sh` exercises
+  `build`/`add`/`update` end-to-end (33 checks) on top of the primitive-level
+  `test/subtree-merge*.sh` from the spike.
