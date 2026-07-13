@@ -270,11 +270,18 @@ No automated tests exist; verify end-to-end in a scratch dir per `CLAUDE.md`:
 
 1. **Default going forward:** keep `replay` the default and require opt-in to
    `merge`, or flip new incorporations to `merge` by default? (Recommendation:
-   opt-in per repo, so nothing changes for existing archive monorepos.)
+   opt-in per repo, so nothing changes for existing archive monorepos.) {{ANWER:
+   opt-in is right.}}
+
 2. **History shape:** is bringing the full upstream DAG (including its merge
    commits) into `main`'s ancestry acceptable, or do you want to keep `main`'s
    log flat and see upstream history only via the `foo/<branch>` mirror?
+   {{ANSWER: Full DAG is fine.}}
+
 3. **git-subtree availability:** OK to depend on the contrib `git subtree`
-   command, or prefer the more portable `merge-tree` plumbing?
-4. **Push-back:** confirm bidirectional (monorepo → upstream) is genuinely out of
-   scope for now.
+   command, or prefer the more portable `merge-tree` plumbing? {{ANSWER: Not
+   sure. Sounds like it would be more portable to not depend on subtree.}}
+
+4. **Push-back:** confirm bidirectional (monorepo → upstream) is genuinely out
+   of scope for now. {{ANSWER: We don't need to implement it. But I'd rather not
+   make choices now that we know will preclude adding it.}}
