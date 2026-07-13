@@ -121,6 +121,36 @@ include a merge it is refused (single repo) or skipped (`--all`), since
 the replay can't reproduce merge commits.
 
 
+# Retiring the original repos
+
+Once the monorepo is the real home of the code, `retire` archives
+(default) or deletes the original GitHub repos:
+
+```
+./retire MONOREPO                        # archive every source repo
+./retire foo.repos                       # same, from a raw .repos file
+./retire --delete MONOREPO               # dry run: report what would be deleted
+./retire --delete --for-real MONOREPO    # actually delete
+```
+
+`SOURCES` is either a local clone of the monorepo (repos come from the
+committed `.monorepoize/sources` file) or a raw `.repos` file. Only
+`github.com` URLs are acted on; other entries (e.g. local bare-repo
+paths) are skipped.
+
+Archiving is reversible so it just happens (preview with `-n`).
+Deleting is not, so `--delete` alone is a dry run and only deletes when
+`--for-real` is added.
+
+When given a monorepo, `retire` also checks that each repo's current
+upstream tip commit is actually present in the monorepo, and skips any
+repo with unincorporated commits — run `./update` first, then retire. A
+raw `.repos` file offers no such check.
+
+Requires an authenticated `gh` CLI; deleting also needs the
+`delete_repo` scope (`gh auth refresh -h github.com -s delete_repo`).
+
+
 # Pushing to GitHub
 
 After you've built your monorepo, you'll probably want to push it to

@@ -1,0 +1,190 @@
+#!/bin/bash
+#
+# Retire the GitHub source repos that have been incorporated into a monorepo:
+# archive them (the default, reversible) or delete them (irreversible, so a
+# dry run unless you also pass --for-real).
+#
+# SOURCES is either a monorepo (a local clone whose default branch has the
+# committed .monorepoize/sources file that build/add record) or a raw .repos
+# file (one URL per line). Only github.com URLs are acted on; other entries
+# (e.g. paths to local bare repos) are skipped.
+#
+# When SOURCES is a monorepo, each repo's current upstream tip is checked
+# against the monorepo's objects and a repo whose latest commits were never
+# incorporated is skipped -- run ./update first. A raw .repos file offers no
+# such check.
+#
+# Needs the gh CLI, authenticated. Deleting also needs the delete_repo scope:
+# gh auth refresh -h github.com -s delete_repo
+
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] SOURCES
+
+Archive (default) or delete the GitHub source repos of a monorepo.
+
+Arguments:
+  SOURCES             A monorepo (local clone with a committed
+                      .monorepoize/sources) or a raw .repos file.
+
+Options:
+      --delete        Delete the repos instead of archiving them. This is a
+                      dry run -- it only reports -- unless --for-real is also
+                      given.
+      --for-real      Actually perform the deletes (only with --delete).
+  -n, --dry-run       Report what would be done without doing it.
+  -h, --help          Show this help.
+EOF
+}
+
+ACTION=archive
+FORREAL=0
+DRYRUN=0
+SRC_ARG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --delete)     ACTION=delete; shift ;;
+    --for-real)   FORREAL=1; shift ;;
+    -n|--dry-run) DRYRUN=1; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)
+      if [ -z "$SRC_ARG" ]; then SRC_ARG="$1"
+      else echo "Error: unexpected argument: $1" >&2; usage >&2; exit 1
+      fi
+      shift ;;
+  esac
+done
+
+die() { echo "Error: $*" >&2; exit 1; }
+
+[ -n "$SRC_ARG" ] || { echo "Error: no SOURCES given" >&2; usage >&2; exit 1; }
+if [ "$FORREAL" -eq 1 ]; then
+  [ "$ACTION" = "delete" ] || die "--for-real only applies with --delete"
+  [ "$DRYRUN" -eq 0 ] || die "can't combine --for-real with --dry-run"
+fi
+# Deleting is irreversible: without --for-real it only reports.
+if [ "$ACTION" = "delete" ] && [ "$FORREAL" -eq 0 ]; then DRYRUN=1; fi
+
+command -v gh >/dev/null 2>&1 || die "needs the GitHub CLI (gh)"
+gh auth status >/dev/null 2>&1 || die "gh is not authenticated (run: gh auth login)"
+
+# Load "name url" entries: from the committed .monorepoize/sources of a
+# monorepo, or from a raw .repos file (deriving each name from the URL
+# basename, as build does). MONO is set only in the former case and enables
+# the incorporation check.
+MONO=""
+ENTRIES=""
+if [ -f "$SRC_ARG" ]; then
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    name=${url##*/}; name=${name%.git}
+    ENTRIES+="$name $url"$'\n'
+  done < "$SRC_ARG"
+elif [ -d "$SRC_ARG" ] && git -C "$SRC_ARG" rev-parse --git-dir >/dev/null 2>&1; then
+  MONO="$SRC_ARG"
+  MAIN=""
+  for b in main master; do
+    if git -C "$MONO" show-ref --verify --quiet "refs/heads/$b"; then MAIN="$b"; break; fi
+  done
+  [ -n "$MAIN" ] || die "$MONO has no 'main' or 'master' branch"
+  ENTRIES=$(git -C "$MONO" show "$MAIN:.monorepoize/sources" 2>/dev/null) \
+    || die "$MONO has no committed .monorepoize/sources; backfill it with
+  './update $MONO --all --repos FILE' or pass the .repos file directly"
+else
+  die "$SRC_ARG is neither a .repos file nor a git repo"
+fi
+[ -n "$ENTRIES" ] || die "no source repos found in $SRC_ARG"
+
+if [ -z "$MONO" ] && [ "$ACTION" = "delete" ]; then
+  echo "Note: SOURCES is a raw .repos file, so there is no monorepo to check" >&2
+  echo "these repos were actually incorporated into." >&2
+  echo >&2
+fi
+
+# Parse "owner/repo" out of a github.com URL (ssh, git@, or https); fails for
+# anything else.
+github_owner_repo() {
+  local rest
+  case "$1" in
+    git@github.com:*)        rest=${1#git@github.com:} ;;
+    ssh://git@github.com/*)  rest=${1#ssh://git@github.com/} ;;
+    https://github.com/*)    rest=${1#https://github.com/} ;;
+    http://github.com/*)     rest=${1#http://github.com/} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%/}; rest=${rest%.git}
+  case "$rest" in */*) printf '%s' "$rest" ;; *) return 1 ;; esac
+}
+
+report() { printf '  %-30s %s\n' "$1" "$2" >&2; }
+
+verb() { if [ "$ACTION" = "delete" ]; then echo delete; else echo archive; fi; }
+
+total=0 n_acted=0 n_would=0 n_already=0 n_skipped=0 n_failed=0
+
+while read -r name url; do
+  [ -n "$name" ] || continue
+  total=$((total + 1))
+
+  if ! or=$(github_owner_repo "$url"); then
+    report "$name" "not a github.com URL — skipped"; n_skipped=$((n_skipped + 1)); continue
+  fi
+
+  if ! info=$(gh repo view "$or" --json isArchived,isEmpty \
+                 --jq '"\(.isArchived) \(.isEmpty)"' 2>/dev/null); then
+    report "$name" "not found on GitHub (already deleted?) — skipped"
+    n_skipped=$((n_skipped + 1)); continue
+  fi
+  read -r archived empty <<< "$info"
+
+  # With a monorepo in hand, refuse to retire a repo whose upstream tip commit
+  # isn't among the monorepo's objects: its latest commits were never
+  # incorporated. (An empty upstream has nothing to lose, so it passes.)
+  if [ -n "$MONO" ] && [ "$empty" != "true" ]; then
+    if ! tip=$(gh api "repos/$or/commits/HEAD" --jq .sha 2>/dev/null) || [ -z "$tip" ]; then
+      report "$name" "couldn't read upstream tip — skipped"
+      n_skipped=$((n_skipped + 1)); continue
+    fi
+    if ! git -C "$MONO" cat-file -e "$tip^{commit}" 2>/dev/null; then
+      report "$name" "upstream has commits not in the monorepo — skipped (run ./update)"
+      n_skipped=$((n_skipped + 1)); continue
+    fi
+  fi
+
+  if [ "$ACTION" = "archive" ] && [ "$archived" = "true" ]; then
+    report "$name" "already archived"; n_already=$((n_already + 1)); continue
+  fi
+
+  if [ "$DRYRUN" -eq 1 ]; then
+    report "$name" "would $(verb) $or"; n_would=$((n_would + 1)); continue
+  fi
+
+  case "$ACTION" in
+    archive)
+      if gh repo archive "$or" --yes >/dev/null 2>&1; then
+        report "$name" "archived $or"; n_acted=$((n_acted + 1))
+      else
+        report "$name" "FAILED to archive $or"; n_failed=$((n_failed + 1))
+      fi ;;
+    delete)
+      if gh repo delete "$or" --yes >/dev/null 2>&1; then
+        report "$name" "deleted $or"; n_acted=$((n_acted + 1))
+      else
+        report "$name" "FAILED to delete $or (missing delete_repo scope? run: gh auth refresh -h github.com -s delete_repo)"
+        n_failed=$((n_failed + 1))
+      fi ;;
+  esac
+done <<< "$ENTRIES"
+
+echo >&2
+echo "$total repo(s): ${n_acted} $(verb)d, $n_would would $(verb), $n_already already archived, $n_skipped skipped, $n_failed failed." >&2
+
+if [ "$ACTION" = "delete" ] && [ "$FORREAL" -eq 0 ] && [ "$n_would" -gt 0 ]; then
+  echo >&2
+  echo "Dry run — nothing was deleted. Re-run with --delete --for-real to delete." >&2
+fi
+[ "$n_failed" -eq 0 ]
