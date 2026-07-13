@@ -32,12 +32,17 @@ implementation honest.
   commits) is exactly the tax a monorepo exists to avoid.
 
 - **The real relative is `git subtree`.** Vendoring another repo's content into
-  a subdirectory and merging updates in over time is precisely what
-  `git subtree merge` / `git subtree pull` do, and the sync design here builds
-  directly on that machinery. So the risk to guard against is *not* "worse than
-  submodules" (we correctly declined submodules) but "worse than just calling
-  `git subtree` directly." `git subtree pull --prefix=foo` already covers most
-  of this plan on its own.
+  a subdirectory and merging updates in over time is conceptually what
+  `git subtree merge` / `git subtree pull` do, and the sync design here builds on
+  the same *merge machinery*. Two caveats, though. First, the `git subtree`
+  **command** is a `contrib/` script, not core git, and is **not guaranteed to be
+  installed** (e.g. absent on stock macOS Xcode git); only the underlying
+  strategy — `git merge -X subtree=<path>` and the `git read-tree` /
+  `git merge-tree` plumbing — is core and always present. So we build on the core
+  machinery, not the contrib command (see Merge mechanics; this is decision 3).
+  Second, because the command may be absent, "worse than just calling
+  `git subtree` directly" is not even a fair baseline everywhere — the wrapper
+  also papers over that portability gap.
 
 - **What justifies the custom layer** — the genuinely novel parts subtree does
   not give you, and the reason this is a wrapper rather than a fork of subtree:
@@ -52,10 +57,12 @@ implementation honest.
   it is well-trodden ground; none combine SHA preservation, multi-repo
   incorporation, and byte-exact extraction the way monorepoize does.
 
-**Design implication:** lean on git's own subtree machinery as hard as possible
-and hand-roll only where the mirror / multi-repo / extract features force it.
-Reimplementing 3-way subtree merging ourselves is the line between wrapping
-subtree *well* and maintaining a parallel merge engine *badly*.
+**Design implication:** lean on git's own *core* subtree merge machinery
+(`-X subtree=`, `merge-tree`) as hard as possible and hand-roll only where the
+mirror / multi-repo / extract features force it. Reimplementing 3-way subtree
+merging ourselves is the line between wrapping git's merge machinery *well* and
+maintaining a parallel merge engine *badly* — but "wrapping subtree" here means
+its merge strategy, not a dependency on the `git subtree` command.
 
 ## Recap of the current model
 
@@ -165,24 +172,29 @@ code fragile). Record it explicitly and use ancestry as the mechanism:
 ### Merge mechanics (to validate during implementation)
 
 Subtree merges have several equivalent incantations with real reliability
-differences; pick one in a spike and lock it in:
+differences; pick one in a spike and lock it in. **Decision 3** rules out
+depending on the contrib `git subtree` command for portability, so both viable
+options are core git:
 
-- `git subtree merge --prefix=foo <mirror-tip>` — highest level; git-subtree is a
-  contrib script but ships with standard git. Verify it is present and that it
-  does *not* rewrite our mirror or inject squash metadata we don't want.
 - `git merge -s recursive -X subtree=foo <mirror-tip>` — relies on the recursive
   strategy's prefix-shift; robust when the prefix is given explicitly (don't rely
-  on auto-detection).
+  on auto-detection). Core git, always present.
 - `git merge-tree --write-tree` (git ≥ 2.38) three-way on the `foo/` subtree,
   then commit the result manually with the upstream tip as a second parent — the
   most explicit and scriptable, no working-tree churn, but requires newer git and
   more plumbing.
+- (`git subtree merge --prefix=foo <mirror-tip>` is the highest-level form, but
+  the `git subtree` command is a `contrib/` script that is **not guaranteed
+  installed** — absent on stock macOS Xcode git, sometimes unbundled on Linux.
+  Ruled out as a dependency for that reason; only its underlying merge strategy,
+  which we get directly above, is core.)
 
 Recommendation: prototype the recursive `-X subtree=foo` form first (fewest
-dependencies), fall back to explicit `merge-tree` plumbing if prefix detection
-misbehaves. Note that `pushdown_one`'s `-X no-renames` is specific to the
-initial unrelated-history merge and should **not** be carried into sync merges,
-where rename detection is desirable.
+dependencies, works on older git), fall back to explicit `merge-tree` plumbing if
+prefix detection misbehaves — mindful that `merge-tree --write-tree` raises the
+minimum git version to 2.38. Note that `pushdown_one`'s `-X no-renames` is
+specific to the initial unrelated-history merge and should **not** be carried
+into sync merges, where rename detection is desirable.
 
 ## Sync mode: opt-in per repo, backward compatible
 
@@ -228,13 +240,29 @@ abort-and-strand behavior:
 - **Monorepo → upstream push-back (true bidirectional).** This plan is one-way:
   pull upstream into a possibly-diverged monorepo section. Pushing monorepo-side
   changes back out to the original repo (subtree split + push) is a separate,
-  larger effort and is out of scope. Mention it as a possible future direction.
+  larger effort and is **not implemented here**. But per **decision 4 we must not
+  make choices now that preclude adding it later**, and the design already keeps
+  the door open:
+
+  - The SHA-preserving `foo/<branch>` mirror stays, so a future `git subtree
+    split --prefix=foo` has a stable reference for "what is already upstream."
+  - Bringing the full upstream DAG into `main`'s ancestry as real merges
+    (decision 2) means a future split can tell monorepo-original commits from
+    already-upstreamed ones and only push the former.
+  - **Do not squash** sync merges and **do not rewrite SHAs** — a squashed or
+    rewritten `foo/` history would make a later clean split much harder. (This is
+    also why merge mode records real merges rather than replayed/flattened
+    commits.)
+
+  So push-back remains a viable future addition on top of this design, not a
+  fork of it.
 - Rewriting history or changing the mirror/ref-naming scheme.
 
 ## Implementation steps
 
-1. **Spike the merge primitive** in a scratch repo (see Testing) to choose among
-   `subtree merge` / `-X subtree` / `merge-tree`. This decision gates the rest.
+1. **Spike the merge primitive** in a scratch repo (see Testing) to choose
+   between core `-X subtree=foo` and `merge-tree --write-tree` plumbing (the
+   contrib `git subtree` command is ruled out — decision 3). This gates the rest.
 2. **Add the `synced` marker** and a helper in `monorepo.sh` to read/upsert it
    (mirror `stage_source`). Record the initial tip in `add`/`build`.
 3. **Add sync-mode metadata** + `add`/`build` flag.
@@ -266,22 +294,32 @@ No automated tests exist; verify end-to-end in a scratch dir per `CLAUDE.md`:
   baseline establishment, then a normal sync → correct, no duplicate commits.
 - Confirm `extract` still reproduces original upstream SHAs after several syncs.
 
-## Open questions / decisions for the user
+## Decisions (resolved)
 
-1. **Default going forward:** keep `replay` the default and require opt-in to
-   `merge`, or flip new incorporations to `merge` by default? (Recommendation:
-   opt-in per repo, so nothing changes for existing archive monorepos.) {{ANWER:
-   opt-in is right.}}
+1. **Default going forward — opt-in per repo.** `replay` stays the default;
+   `merge` mode is opt-in, so nothing changes for existing archive monorepos.
+   (Reflected in "Sync mode" above.)
 
-2. **History shape:** is bringing the full upstream DAG (including its merge
-   commits) into `main`'s ancestry acceptable, or do you want to keep `main`'s
-   log flat and see upstream history only via the `foo/<branch>` mirror?
-   {{ANSWER: Full DAG is fine.}}
+2. **History shape — full upstream DAG is acceptable.** Merge mode brings the
+   upstream history (including its merge commits) into `main`'s ancestry as real
+   merges. This is also what makes the linear-history restriction go away and
+   what keeps future push-back feasible (decision 4).
 
-3. **git-subtree availability:** OK to depend on the contrib `git subtree`
-   command, or prefer the more portable `merge-tree` plumbing? {{ANSWER: Not
-   sure. Sounds like it would be more portable to not depend on subtree.}}
+3. **git-subtree availability — do not depend on the contrib command.** Prefer
+   the portable core machinery (`git merge -X subtree=`, `git merge-tree`). The
+   `git subtree` command is a `contrib/` script that may be absent (e.g. stock
+   macOS Xcode git), which also fits this repo's macOS+Linux portability goal.
+   (Reflected in "Merge mechanics" and implementation step 1.)
 
-4. **Push-back:** confirm bidirectional (monorepo → upstream) is genuinely out
-   of scope for now. {{ANSWER: We don't need to implement it. But I'd rather not
-   make choices now that we know will preclude adding it.}}
+4. **Push-back — not implemented now, but not precluded.** Bidirectional
+   (monorepo → upstream) sync stays out of scope, but the design deliberately
+   avoids choices that would block adding it later (keep the SHA-preserving
+   mirror, real upstream ancestry, no squash/rewrite). See Non-goals for the
+   specific constraints this imposes.
+
+## Remaining open question
+
+- **Merge primitive:** the spike (implementation step 1) still has to pick
+  between `-X subtree=foo` and `merge-tree --write-tree` and confirm prefix
+  handling is reliable against a base/ours/theirs where `ours` is prefixed and
+  base/theirs are root-level. Everything else above is settled.
