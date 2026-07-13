@@ -14,6 +14,49 @@ This plan describes how to augment the tooling to do that without breaking the
 SHA-preservation and ref-naming invariants that `extract` and `retire` depend
 on.
 
+## Relationship to submodules, subtree, and prior art
+
+The obvious question about continuous syncing is "isn't this just git
+submodules?" It is not — and knowing *which* tool this resembles keeps the
+implementation honest.
+
+- **Submodules solve the opposite problem.** A submodule is a *pointer*: the
+  superproject stores a gitlink recording "at `foo/`, use commit X of repo Y,"
+  and the sub-repo's objects and history stay in a separate repository. The
+  boundary is preserved and referenced. Monorepoize *dissolves* the boundary —
+  files live directly in the one tree under `foo/`, every original commit is
+  imported into the one object store (with its original SHA), one clone, one
+  worktree, one history graph. Choosing this model over submodules is
+  deliberate: the separation submodules enforce (recursive init, per-consumer
+  access to every sub-repo, detached-HEAD footguns, no atomic cross-repo
+  commits) is exactly the tax a monorepo exists to avoid.
+
+- **The real relative is `git subtree`.** Vendoring another repo's content into
+  a subdirectory and merging updates in over time is precisely what
+  `git subtree merge` / `git subtree pull` do, and the sync design here builds
+  directly on that machinery. So the risk to guard against is *not* "worse than
+  submodules" (we correctly declined submodules) but "worse than just calling
+  `git subtree` directly." `git subtree pull --prefix=foo` already covers most
+  of this plan on its own.
+
+- **What justifies the custom layer** — the genuinely novel parts subtree does
+  not give you, and the reason this is a wrapper rather than a fork of subtree:
+
+  1. **SHA-preserving mirror branches** (`foo/<branch>` / `foo/<tag>`) that
+     `extract` and `retire` depend on; plain subtree keeps no such mirror.
+  2. **Many repos at once**, with namespaced branches/tags and recorded
+     provenance (`.monorepoize/sources`).
+  3. **Round-tripping** — `extract` reproduces a standalone repo byte-for-byte.
+
+  Other tools in this space (`git-vendor`, Google's `copybara`, `josh`) confirm
+  it is well-trodden ground; none combine SHA preservation, multi-repo
+  incorporation, and byte-exact extraction the way monorepoize does.
+
+**Design implication:** lean on git's own subtree machinery as hard as possible
+and hand-roll only where the mirror / multi-repo / extract features force it.
+Reimplementing 3-way subtree merging ourselves is the line between wrapping
+subtree *well* and maintaining a parallel merge engine *badly*.
+
 ## Recap of the current model
 
 When repo `foo` is incorporated (`incorporate` + `pushdown_one` in
