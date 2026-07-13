@@ -52,6 +52,104 @@ has been integrated. You don't edit these by hand; `build`, `add`, and
 `update` maintain them.
 
 
+# Incorporating a repo and merging later changes from the original
+
+`build` on its own treats each incorporated repo as a frozen import. But
+you can also keep a repo **live**: let the monorepo edit its `name/`
+subdirectory *and* keep pulling in new commits from the original repo,
+merging the two whenever they both change. That's **merge mode**, and the
+workflow is: incorporate the repo in merge mode, then run `update`
+whenever you want to fold upstream changes in.
+
+## 1. Incorporate the repo in merge mode
+
+Pick the entry point that matches where you're starting:
+
+- **A brand-new monorepo, all repos live** — pass `--sync=merge` to
+  `build` (before the repos file):
+
+  ```
+  ./build --sync=merge something.repos
+  ```
+
+- **Add one repo to an existing monorepo** — `add` operates on the
+  monorepo you are standing in, so enter a clone of it first, then run the
+  `add` script by path:
+
+  ```
+  cd something                                   # a clone of the monorepo
+  /path/to/monorepoize/add --sync=merge git@github.com:me/foo.git
+  ```
+
+  This incorporates `foo` under `foo/` with its original history and SHAs
+  (exactly like `build`) and records it in merge mode. `add` also accepts
+  a path to a bare repo instead of a URL.
+
+- **A repo already incorporated in replay mode** — you don't rebuild;
+  just pass `--merge` the next time you sync it (step 2). The first such
+  run establishes a baseline and switches it to merge mode.
+
+Merge mode is recorded per repo (in `.monorepoize/modes`), so you choose
+it once — every later `update` remembers it.
+
+## 2. Merge later changes from the original
+
+Run `update` against a local clone of the monorepo. It fetches the
+original repo's new commits and subtree-merges them into `name/`:
+
+```
+./update something foo           # sync one repo
+./update something --all         # sync every repo, each in its recorded mode
+./update something foo --merge    # first time, or to switch foo to merge mode
+```
+
+Because it is a real 3-way merge:
+
+- Edits the monorepo made under `foo/` and edits made upstream are
+  **combined automatically** when they don't touch the same lines.
+
+- When they *do* overlap you get an ordinary git conflict. `update` stops
+  and tells you; resolve the files in the working tree, `git add` them,
+  and `git commit` to finish the merge (or `git merge --abort` to back
+  out). The resolution is recorded in the merge commit, so that same
+  conflict won't come back on the next sync.
+
+- **Merge commits** in the original repo's history come along too — merge
+  mode has none of replay mode's "linear history only" restriction.
+
+Preview before you commit to it:
+
+```
+./update something foo -n        # "N new commit(s)", or "Already up to date"
+```
+
+See "Updating a repo with later upstream commits" below for the full set
+of flags (`-u`, `--repos`, `--same-origin`, `--push`, `--all`).
+
+## A worked example
+
+```
+# Build a monorepo whose repos you intend to keep syncing.
+./build --sync=merge myorg.repos
+cd myorg
+
+# ...work on foo/ inside the monorepo and commit as usual...
+git commit -am "tidy up foo's config"
+
+# Meanwhile the original foo repo got new commits. Fold them in:
+cd ..
+./update myorg foo
+# -> Integrated 3 commit(s) under foo/ on main.
+
+# If the merge conflicts, update stops with the merge in progress. Finish
+# it inside the monorepo:
+cd myorg
+$EDITOR foo/whatever.txt          # resolve the conflict markers
+git add foo/whatever.txt
+git commit                        # completes the merge and records the fix
+```
+
+
 # Extracting a repo
 
 `extract` is the inverse of `build`/`add`: it pulls one original repo
