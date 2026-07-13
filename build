@@ -7,7 +7,7 @@ case "$1" in
         cat <<EOF
 Build a monorepo from multiple existing repos.
 
-Usage: build REPOSFILE [DEFAULT_BRANCH]
+Usage: build [--sync=MODE] REPOSFILE [DEFAULT_BRANCH]
 
 REPOSFILE should be named foo.repos where foo is the name of the directory to
 build the monoropo in and should contain either github URLs or paths to bare
@@ -17,12 +17,27 @@ BRANCH is the branch name that will be created as the main branch in the mono
 repo. Defaults to 'main'. All other branches from incorporated repos will be
 mapped to new branchs in the monorepo.
 
+--sync=MODE sets how later upstream commits are folded back in by \`update\`:
+'replay' (default) replays them onto the subdir, 'merge' subtree-merges them so
+the monorepo side can also change the subdir. It can be changed later per repo
+with \`update --merge\`.
+
 EOF
         exit 0
         ;;
 esac
 
-
+# Parse a leading --sync=MODE flag; everything else stays positional.
+SYNC=replay
+posargs=()
+for a in "$@"; do
+    case "$a" in
+        --sync=*) SYNC="${a#*=}" ;;
+        *) posargs+=("$a") ;;
+    esac
+done
+set -- "${posargs[@]}"
+case "$SYNC" in merge|replay) ;; *) echo "Invalid --sync mode: $SYNC (want merge or replay)" >&2; exit 1 ;; esac
 
 source "$(dirname $0)/monorepo.sh"
 
@@ -51,4 +66,17 @@ pushdown "$branch"
 printf '%s' "$sources" | while read -r name repo; do
     [ -n "$name" ] && stage_source "$name" "$repo"
 done
+
+# In merge mode, mark each repo and record its initial integration point (the
+# upstream tip that main was just built from) so `update` can subtree-merge
+# later commits from a correct base.
+if [ "$SYNC" = merge ]; then
+    printf '%s' "$sources" | while read -r name repo; do
+        [ -n "$name" ] || continue
+        if git show-ref --verify --quiet "refs/heads/$name/$branch"; then
+            stage_mode "$name" merge
+            stage_synced "$name" "$(git rev-parse "refs/heads/$name/$branch")"
+        fi
+    done
+fi
 git commit -q -m "Record source URLs."

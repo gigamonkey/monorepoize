@@ -25,22 +25,43 @@ When a source repo `foo` is incorporated into a monorepo:
   merge with `--allow-unrelated-histories -X no-renames`).
 
 - The source URL is recorded as a `name url` line in the committed
-  `.monorepoize/sources` file (`stage_source`).
+  `.monorepoize/sources` file (`stage_source`). Two sibling markers under
+  `.monorepoize/` support ongoing syncing: `modes` (per-repo sync mode; absent
+  = `replay`) and `synced` (per-repo last-integrated upstream SHA). All three
+  are upserted via the shared `stage_kv` helper (`stage_source`/`stage_mode`/
+  `stage_synced`).
 
 Everything else is derived from these invariants: `extract` recovers an
 original repo byte-for-byte by fetching `foo/*` refs with the prefix stripped;
-`update` fetches new upstream commits onto `foo/<branch>` (same SHAs) and
-replays them onto the `foo/` subdir with `git format-patch | git am
---directory=foo` (linear history only — ranges containing merges are
-refused/skipped); `constituent_names` discovers repo names from the `<name>/`
-branch namespaces. Don't break the SHA-preservation or ref-naming scheme —
-extraction and updating both depend on them.
+`update` fetches new upstream commits onto `foo/<branch>` (same SHAs) and then
+integrates them into the `foo/` subdir in one of two modes; `constituent_names`
+discovers repo names from the `<name>/` branch namespaces. Don't break the
+SHA-preservation or ref-naming scheme — extraction and updating both depend on
+them.
+
+`update`'s two integration modes:
+
+- **replay** (default): `git format-patch base..newtip | git am --directory=foo`
+  replays the new commits onto `foo/`. Linear history only — a range containing
+  a merge is refused (single) or skipped (`--all`) — and it assumes the monorepo
+  hasn't edited `foo/` itself.
+
+- **merge** (`--merge`, or `build`/`add --sync=merge`): `git merge -X
+  subtree=foo refs/heads/foo/<branch>` subtree-merges the upstream tip into
+  `foo/`. This is the path for a monorepo that *also* edits `foo/`: real 3-way
+  merges, conflicts resolved once and recorded, upstream merge commits included.
+  It relies on core-git subtree merging, **not** the contrib `git subtree`
+  command (which may be absent). Switching a diverged/replay repo to merge mode
+  establishes a baseline with `git merge -s ours`. The `synced` marker (not the
+  mirror ref) is the integration base, so a conflicted/aborted sync is never
+  mistaken for "up to date". See `plans/continuous-upstream-sync.md`.
 
 ## Layout
 
 - `monorepo.sh` — shared function library sourced by everything else
-  (`incorporate`, `pushdown`, `pushdown_one`, `constituent_names`,
-  `stage_source`, ...). Not run directly.
+  (`incorporate`, `pushdown`, `pushdown_one`, `constituent_names`, `stage_kv`
+  and its `stage_source`/`stage_mode`/`stage_synced` wrappers, ...). Not run
+  directly.
 
 - `build`, `add`, `extract`, `update`, `pushdown`, `retire` — the commands;
   each has `--help` or a header comment. `retire` (archive/delete the original
@@ -75,12 +96,15 @@ extraction and updating both depend on them.
 ## Testing changes
 
 There is no CI. The `test/` directory holds self-contained bash scripts (run
-directly, e.g. `./test/subtree-merge.sh`) that build throwaway monorepos in a
+directly, e.g. `./test/update-merge.sh`) that build throwaway monorepos in a
 `mktemp` dir under an isolated git config and assert behavior; they exit with
-the number of failed checks. They currently cover the `git merge -X subtree=`
-primitive behind the planned merge-based sync (`plans/continuous-upstream-sync.md`),
-not the shipped commands. `test/lib.sh` is the shared PASS/FAIL + git-env
-harness.
+the number of failed checks. `test/update-merge.sh` drives the real `build`/
+`update` commands through the merge-based sync paths (concurrent divergence,
+recorded conflict resolution, upstream merges, replay→merge switch, `--all`);
+`test/subtree-merge.sh` and `test/subtree-merge-edge-cases.sh` cover the
+underlying `git merge -X subtree=` primitive. `test/lib.sh` is the shared
+PASS/FAIL + git-env harness. Run all three after changing `update`,
+`monorepo.sh`, `build`, or `add`.
 
 For anything not yet scripted, verify end-to-end in a scratch directory: create
 a couple of throwaway source repos, list their paths in a `name.repos` file, run

@@ -68,25 +68,48 @@ function constituent_names {
 }
 
 #
+# Upsert a "name value" line into a committed .monorepoize/<file>, keeping one
+# line per repo, and stage it. This is the common shape of every per-repo record
+# monorepoize keeps (sources, sync positions, sync modes); the callers below are
+# thin wrappers. Only stages the file; the caller commits.
+#
+function stage_kv {
+    local file name value dir path
+    file=$1
+    name=$2
+    value=$3
+    dir=".monorepoize"
+    path="$dir/$file"
+    mkdir -p "$dir"
+    if [ -f "$path" ]; then
+        awk -v n="$name" '$1 != n' "$path" > "$path.tmp"
+        mv "$path.tmp" "$path"
+    fi
+    printf '%s %s\n' "$name" "$value" >> "$path"
+    git add "$path"
+}
+
+#
 # Record (upsert) the source URL a repo was incorporated from in a committed
 # .monorepoize/sources file, so `update` (and any future tooling) can find the
-# upstream with no extra input. One "name url" line per repo. This only stages
-# the file; the caller commits (build records several at once, add records one).
+# upstream with no extra input. One "name url" line per repo.
 #
-function stage_source {
-    local name url dir file
-    name=$1
-    url=$2
-    dir=".monorepoize"
-    file="$dir/sources"
-    mkdir -p "$dir"
-    if [ -f "$file" ]; then
-        awk -v n="$name" '$1 != n' "$file" > "$file.tmp"
-        mv "$file.tmp" "$file"
-    fi
-    printf '%s %s\n' "$name" "$url" >> "$file"
-    git add "$file"
-}
+function stage_source { stage_kv sources "$1" "$2"; }
+
+#
+# Record how far upstream a repo has been integrated: the last upstream commit
+# SHA folded into the <name>/ subdir on the default branch. This is `update`'s
+# source of truth for the integration base -- decoupled from the mirror ref, so
+# a failed sync can never be mistaken for "up to date". One line per repo.
+#
+function stage_synced { stage_kv synced "$1" "$2"; }
+
+#
+# Record a repo's sync mode ("merge" or "replay"). Absent = "replay" (the
+# historical behavior), so existing monorepos need no migration. One line per
+# repo. See `update` for what the modes mean.
+#
+function stage_mode { stage_kv modes "$1" "$2"; }
 
 function incorporate {
     local name url before after

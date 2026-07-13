@@ -5,12 +5,22 @@
 #
 # monorepoize keeps each source repo as a <name>/<branch> branch (its original
 # history and SHAs) and lays that branch's content under a <name>/ subdirectory
-# on the monorepo's default branch. So updating one repo is two steps:
-#   1. fetch the upstream repo's new commits onto the <name>/<branch> branch
-#      (original SHAs preserved, exactly like incorporate), and
-#   2. replay just those new commits onto the <name>/ subdir of the default
-#      branch with `git format-patch | git am --directory=<name>`, which keeps
-#      each commit's message, author, and date.
+# on the monorepo's default branch. There are two ways to fold new commits in:
+#
+#   replay (default): replay just the new commits onto the <name>/ subdir with
+#     `git format-patch | git am --directory=<name>`, keeping each commit's
+#     message, author, and date. This is for the archive case where the monorepo
+#     never edits <name>/ itself; it can only apply a linear range (no merges)
+#     and conflicts if the subdir has diverged.
+#
+#   merge (opt in with --merge, or build/add --sync=merge): subtree-merge the
+#     upstream tip into the <name>/ subdir with `git merge -X subtree=<name>`.
+#     This is for the live case where BOTH the upstream repo and the monorepo's
+#     <name>/ keep changing: it does a real 3-way merge (conflicts resolved once
+#     and recorded), and folds in upstream merge commits too. Each repo's mode is
+#     recorded in .monorepoize/modes; how far upstream it has been integrated is
+#     recorded in .monorepoize/synced (the integration base, decoupled from the
+#     mirror ref so a failed sync is never mistaken for "up to date").
 #
 # The upstream URL for each repo is read from the committed .monorepoize/sources
 # file that build/add records. Override a single repo with --upstream, point at a
@@ -23,10 +33,6 @@
 #
 # Run it against a local clone of the monorepo (it mutates that clone); push the
 # result back with --push, or yourself afterward.
-#
-# Assumes the new upstream commits are a linear extension of what's already in
-# the monorepo (format-patch/am don't replay merge commits); repos whose range
-# contains a merge are skipped/refused.
 
 source "$(dirname "$0")/monorepo.sh"
 set +x   # monorepo.sh enables command tracing; this command stays quiet.
@@ -47,6 +53,12 @@ Arguments:
 Options:
       --all           Update every repo in the monorepo. Raw git output is
                       suppressed; you get one summary line per repo.
+      --merge         Use (and switch the repo to) merge mode: subtree-merge new
+                      upstream commits into <name>/ instead of replaying them.
+                      Handles a monorepo side that also edits <name>/ and folds
+                      in upstream merge commits. Recorded, so later runs need no
+                      flag. On first use for a diverged/replay repo it establishes
+                      a merge baseline.
   -u, --upstream URL  Source repo to pull from (single repo only). Overrides the
                       URL recorded in .monorepoize/sources.
       --repos FILE    A .repos file (one source URL per line) to resolve upstream
@@ -72,6 +84,7 @@ BRANCH=""
 DRYRUN=0
 PUSH=0
 ALL=0
+WANT_MERGE=0
 MONOREPO=""
 NAME=""
 
@@ -80,6 +93,7 @@ while [ $# -gt 0 ]; do
     -u|--upstream) UPSTREAM="$2"; shift 2 ;;
     --repos)       REPOS_FILE="$2"; shift 2 ;;
     --same-origin) SAME_ORIGIN=1; shift ;;
+    --merge)       WANT_MERGE=1; shift ;;
     -b|--branch)   BRANCH="$2"; shift 2 ;;
     -n|--dry-run)  DRYRUN=1; shift ;;
     --push)        PUSH=1; shift ;;
@@ -135,6 +149,16 @@ MONO_MAIN=${mono_main_ref#refs/heads/}
 
 # Source URLs recorded by build/add, read from the committed default-branch file.
 SOURCES=$(git show "$MONO_MAIN:.monorepoize/sources" 2>/dev/null || true)
+
+# Per-repo sync markers, read live from the committed default branch each call so
+# they reflect commits this run makes (baseline/marker updates as we go).
+# synced_for: last integrated upstream SHA (empty if never recorded).
+# mode_for:   "merge" or "replay" (default "replay" when unrecorded).
+# The `|| true` keeps a missing marker file (git show exits 128) from tripping
+# `set -o pipefail` + `set -e` -- an absent marker just yields the empty string.
+marker_value() { { git show "$MONO_MAIN:.monorepoize/$1" 2>/dev/null || true; } | awk -v n="$2" '$1 == n { print $2; exit }'; }
+synced_for()   { marker_value synced "$1"; }
+mode_for()     { local m; m=$(marker_value modes "$1"); printf '%s' "${m:-replay}"; }
 
 # Monorepo's own origin, used by --same-origin to derive eponymous upstreams.
 ORIGIN=$(git remote get-url origin 2>/dev/null || true)
@@ -196,55 +220,117 @@ if [ -z "$SOURCES" ] && [ -n "$REPOS_FILE" ] && [ "$DRYRUN" -eq 0 ]; then
   fi
 fi
 
-# Update one repo. Sets _status (nobranch|nourl|missing|uptodate|merges|pending|
-# updated|conflict) and _count; prints nothing; never exits.
-update_one() {
-  local name="$1" upstream br src_ref oldtip newtip merges peek=0
-  _status=""; _count=0
+# Subtree-merge the upstream tip THEIRS into <name>/ on the current branch,
+# leaving the result staged but uncommitted (so the caller can fold the sync
+# marker into the same commit, or leave a conflict in progress). Returns 0 on a
+# clean merge, non-zero on conflict.
+run_merge() {
+  local name="$1" theirs="$2"
+  if [ "$QUIET" -eq 1 ]; then
+    git merge --no-commit --no-edit -X subtree="$name" "$theirs" >/dev/null 2>&1
+  else
+    git merge --no-commit --no-edit -X subtree="$name" "$theirs"
+  fi
+}
 
+# Replay the linear range base..newtip onto the <name>/ subdir. Returns 0 on
+# success, non-zero on conflict (caller aborts).
+run_replay() {
+  local name="$1" base="$2" newtip="$3"
+  if [ "$QUIET" -eq 1 ]; then
+    git format-patch --stdout "$base..$newtip" 2>/dev/null | git am --3way --directory="$name" >/dev/null 2>&1
+  else
+    git format-patch --stdout "$base..$newtip" | git am --3way --directory="$name"
+  fi
+}
+
+# Update one repo. Sets _status (nobranch|nourl|missing|uptodate|merges|pending|
+# updated|conflict), _count, and _mode (the effective mode); prints nothing;
+# never exits.
+update_one() {
+  local name="$1" upstream br src_ref base newtip merges mode want have_marker
+  _status=""; _count=0; _mode=""
+
+  # Locate the pre-fetch mirror branch and its branch name.
   br=""; src_ref=""
   local b
   for b in ${BRANCH:-main master}; do
     if src_ref=$(resolve_ref "refs/heads/$name/$b" "refs/remotes/origin/$name/$b"); then br="$b"; break; fi
   done
   if [ -z "$src_ref" ]; then _status="nobranch"; return 0; fi
-  oldtip=$(git rev-parse "$src_ref")
 
   if ! upstream=$(upstream_for "$name"); then _status="nourl"; return 0; fi
 
+  # Effective mode: the recorded mode, unless --merge forces a switch to merge.
+  mode=$(mode_for "$name")
+  if [ "$WANT_MERGE" -eq 1 ]; then want="merge"; else want="$mode"; fi
+  _mode="$want"
+
+  # Integration base: the recorded synced position, else the current mirror tip
+  # (first-time / legacy). Deliberately NOT re-derived from the just-fetched
+  # mirror, so a failed integration can never be mistaken for "up to date".
+  base=$(synced_for "$name"); have_marker=1
+  if [ -z "$base" ]; then base=$(git rev-parse "$src_ref"); have_marker=0; fi
+
+  ##################### dry run: report only, no writes ####################
   if [ "$DRYRUN" -eq 1 ]; then
     if ! gq fetch --quiet "$upstream" "refs/heads/$br:refs/__update_peek"; then _status="missing"; return 0; fi
-    newtip=$(git rev-parse refs/__update_peek); peek=1
-  else
-    if ! gq fetch --quiet --no-tags "$upstream" "+refs/heads/*:refs/heads/$name/*"; then _status="missing"; return 0; fi
-    gq fetch --quiet "$upstream" "+refs/tags/*:refs/tags/$name/*" || true
-    newtip=$(git rev-parse "refs/heads/$name/$br")
+    newtip=$(git rev-parse refs/__update_peek)
+    git update-ref -d refs/__update_peek >/dev/null 2>&1 || true
+    if [ "$base" = "$newtip" ]; then _status="uptodate"; return 0; fi
+    _count=$(git rev-list --count "$base..$newtip")
+    merges=$(git rev-list --merges --count "$base..$newtip")
+    if [ "$want" = "replay" ] && [ "$merges" -ne 0 ]; then _status="merges"; return 0; fi
+    _status="pending"; return 0
   fi
 
-  if [ "$oldtip" = "$newtip" ]; then
-    _status="uptodate"
-    [ "$peek" -eq 1 ] && { git update-ref -d refs/__update_peek >/dev/null 2>&1 || true; }
-    return 0
-  fi
-
-  merges=$(git rev-list --merges --count "$oldtip..$newtip")
-  _count=$(git rev-list --count "$oldtip..$newtip")
-  [ "$peek" -eq 1 ] && { git update-ref -d refs/__update_peek >/dev/null 2>&1 || true; }
-
-  if [ "$merges" -ne 0 ]; then _status="merges"; return 0; fi
-  if [ "$DRYRUN" -eq 1 ]; then _status="pending"; return 0; fi
-
+  ############## establish/record baseline & mode as needed ###############
+  # Ensure the base is an ancestor of the default branch (needed when switching a
+  # diverged/replay-built repo to merge mode) and that the mode/synced markers
+  # exist, committing whatever changed as a one-time baseline.
   gq checkout --quiet "$MONO_MAIN"
-  if [ "$QUIET" -eq 1 ]; then
-    if git format-patch --stdout "$oldtip..$newtip" 2>/dev/null | git am --3way --directory="$name" >/dev/null 2>&1; then
+  if [ "$want" = "merge" ] && ! git merge-base --is-ancestor "$base" "$MONO_MAIN"; then
+    gq merge -s ours --no-edit -m "Establish merge baseline for $name at $(git rev-parse --short "$base")." "$base"
+  fi
+  local baseline_changed=0
+  if [ "$want" != "$mode" ]; then stage_mode "$name" "$want"; baseline_changed=1; fi
+  if [ "$have_marker" -eq 0 ]; then stage_synced "$name" "$base"; baseline_changed=1; fi
+  if [ "$baseline_changed" -eq 1 ]; then gq commit -q -m "Record sync mode/position for $name."; fi
+  mode="$want"
+
+  ########################### advance the mirror ##########################
+  if ! gq fetch --quiet --no-tags "$upstream" "+refs/heads/*:refs/heads/$name/*"; then _status="missing"; return 0; fi
+  gq fetch --quiet "$upstream" "+refs/tags/*:refs/tags/$name/*" || true
+  newtip=$(git rev-parse "refs/heads/$name/$br")
+
+  if [ "$base" = "$newtip" ]; then _status="uptodate"; return 0; fi
+  _count=$(git rev-list --count "$base..$newtip")
+  merges=$(git rev-list --merges --count "$base..$newtip")
+
+  ############################### integrate ###############################
+  if [ "$mode" = "merge" ]; then
+    gq checkout --quiet "$MONO_MAIN"
+    if run_merge "$name" "refs/heads/$name/$br"; then
+      stage_synced "$name" "$newtip"
+      gq commit -q -m "Merge $_count upstream commit(s) for $name under $name/."
       _status="updated"
+    elif [ "$QUIET" -eq 1 ]; then
+      git merge --abort >/dev/null 2>&1 || true; _status="conflict"
     else
-      git am --abort >/dev/null 2>&1 || true; _status="conflict"
+      # Single-repo: leave the merge in progress and stage the marker so the
+      # user's resolving commit records the new sync position.
+      stage_synced "$name" "$newtip"; _status="conflict"
     fi
   else
-    if git format-patch --stdout "$oldtip..$newtip" | git am --3way --directory="$name"; then
+    if [ "$merges" -ne 0 ]; then _status="merges"; return 0; fi
+    gq checkout --quiet "$MONO_MAIN"
+    if run_replay "$name" "$base" "$newtip"; then
+      stage_synced "$name" "$newtip"
+      gq commit -q -m "Record sync position for $name."
       _status="updated"
     else
+      # Marker stays at base (unchanged), so re-running re-detects the pending
+      # commits rather than reporting "up to date".
       git am --abort >/dev/null 2>&1 || true; _status="conflict"
     fi
   fi
@@ -260,11 +346,16 @@ if [ "$ALL" -eq 0 ]; then
     nobranch) die "no '$NAME/${BRANCH:-main|master}' branch in this monorepo; was it built/cloned with the per-repo branches?" ;;
     nourl)    die "no upstream URL known for '$NAME'; pass -u URL, --repos FILE, or --same-origin, or rebuild so .monorepoize/sources is recorded" ;;
     missing)  die "could not fetch the upstream for '$NAME' (deleted, or unreachable); pass -u to point at it" ;;
-    merges)   die "the upstream range for '$NAME' has merge commit(s); this only handles linear history" ;;
+    merges)   die "the upstream range for '$NAME' has merge commit(s); replay mode only handles linear history — use --merge to subtree-merge instead" ;;
     uptodate) echo "Already up to date." >&2; exit 0 ;;
     pending)  echo "$_count new commit(s) for '$NAME' (dry run — nothing changed)." >&2; exit 0 ;;
-    conflict) die "could not apply '$NAME' cleanly under $NAME/ (conflicts). Its branch was updated; $MONO_MAIN left unchanged. Resolve by hand." ;;
-    updated)  echo "Applied $_count commit(s) under $NAME/ on $MONO_MAIN." >&2 ;;
+    conflict)
+      if [ "$_mode" = "merge" ]; then
+        die "merge conflict integrating '$NAME' under $NAME/. The merge is in progress on $MONO_MAIN: resolve the conflicts, 'git add' them, and 'git commit' to finish (the sync marker is already staged), or 'git merge --abort' to back out."
+      else
+        die "could not apply '$NAME' cleanly under $NAME/ (conflicts). $MONO_MAIN left unchanged and the sync position was not advanced, so re-running will retry these commits. Resolve by hand, or switch to --merge."
+      fi ;;
+    updated)  echo "Integrated $_count commit(s) under $NAME/ on $MONO_MAIN." >&2 ;;
   esac
 
   if [ "$PUSH" -eq 1 ]; then

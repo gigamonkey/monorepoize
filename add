@@ -2,6 +2,18 @@
 
 set -e
 
+# Parse a leading --sync=MODE flag; everything else stays positional.
+SYNC=replay
+posargs=()
+for a in "$@"; do
+    case "$a" in
+        --sync=*) SYNC="${a#*=}" ;;
+        *) posargs+=("$a") ;;
+    esac
+done
+set -- "${posargs[@]}"
+case "$SYNC" in merge|replay) ;; *) echo "Invalid --sync mode: $SYNC (want merge or replay)" >&2; exit 1 ;; esac
+
 source "$(dirname $0)/monorepo.sh"
 
 here=$(pwd)
@@ -25,4 +37,11 @@ pushdown_one "$branch" "$name/$branch"
 # Record where this repo came from so `update` can pull later upstream commits.
 git switch "$branch"
 stage_source "$name" "$repo"
+
+# In merge mode, mark the repo and record its initial integration point (the
+# upstream tip just merged in) so `update` can subtree-merge later commits.
+if [ "$SYNC" = merge ] && git show-ref --verify --quiet "refs/heads/$name/$branch"; then
+    stage_mode "$name" merge
+    stage_synced "$name" "$(git rev-parse "refs/heads/$name/$branch")"
+fi
 git commit -q -m "Record source URL for $name."

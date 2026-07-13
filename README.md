@@ -25,7 +25,11 @@ branch as the second argument to the `build` script.)
 
 - Run `./build something.repos`. It will create a directory named
   `something` and incorporate all the repos listed in the
-  `something.repos` file.
+  `something.repos` file. Pass `--sync=merge` (before the repos file) if
+  you intend to keep editing the incorporated subdirectories *and* keep
+  pulling upstream changes — it puts every repo in merge mode from the
+  start (see "Updating a repo" below). The default, `--sync=replay`,
+  suits an archive that only ever receives upstream commits.
 
 - After the monorepo is built, look for `empty-repo.txt` and
   `no-branch.txt` files in the subdirectories. These are created if
@@ -41,7 +45,11 @@ branch as the second argument to the `build` script.)
 `build` (and `add`) also record where each repo came from in a
 committed `.monorepoize/sources` file (one `name url` line per repo).
 The `update` command (below) reads this to find each repo's upstream
-with no extra arguments.
+with no extra arguments. Two sibling files under `.monorepoize/` support
+merge-mode syncing: `modes` records each repo's sync mode (absent means
+`replay`), and `synced` records how far upstream each merge-mode repo
+has been integrated. You don't edit these by hand; `build`, `add`, and
+`update` maintain them.
 
 
 # Extracting a repo
@@ -81,15 +89,37 @@ tell you to re-push with `git push --all && git push --tags`.
 # Updating a repo with later upstream commits
 
 If a source repo gets new commits after the monorepo was built, `update`
-folds them back in, preserving history. It fetches the new commits onto
-the `name/<branch>` branch (original SHAs, exactly like `build`) and
-replays just the new commits onto the `name/` subdirectory of the
-default branch, keeping each commit's message, author, and date.
+folds them back in, preserving history. Either way it first fetches the
+new commits onto the `name/<branch>` branch (original SHAs, exactly like
+`build`); it then integrates them into the `name/` subdirectory of the
+default branch in one of two modes.
+
+**replay** (the default) replays just the new commits onto the `name/`
+subdirectory with `git format-patch | git am`, keeping each commit's
+message, author, and date. This suits the *archive* case where the
+monorepo never edits `name/` itself. It only applies a linear range —
+if the upstream range contains a merge commit it is refused (single
+repo) or skipped (`--all`) — and it conflicts if the subdirectory has
+diverged.
+
+**merge** (opt in with `--merge`, or from the start with `build`/`add`
+`--sync=merge`) subtree-merges the upstream tip into `name/` with
+`git merge -X subtree=name`. This suits the *live* case where **both**
+the upstream repo and the monorepo's `name/` keep changing: it does a
+real 3-way merge, so an overlap is a normal git conflict you resolve
+once and the resolution is recorded (it never re-surfaces), and upstream
+merge commits come along too. Passing `--merge` also switches the repo
+to merge mode permanently (recorded in `.monorepoize/modes`), so later
+runs need no flag; on first use for a diverged or replay-built repo it
+establishes a merge baseline. How far upstream each repo has been
+integrated is tracked in `.monorepoize/synced`, decoupled from the
+mirror branch so a failed sync is never mistaken for "up to date".
 
 Run it against a local clone of the monorepo (it mutates that clone):
 
 ```
 ./update MONOREPO NAME [options]
+./update MONOREPO NAME --merge
 ./update MONOREPO --all
 ```
 
@@ -107,8 +137,13 @@ Run it against a local clone of the monorepo (it mutates that clone):
   the same origin as the monorepo (e.g. the same GitHub org). It is a
   fallback, tried after any recorded sources or `--repos` file.
 
+- `--merge` uses (and permanently switches the repo to) merge mode; see
+  above. `--all` respects each repo's recorded mode, so once a repo is on
+  merge mode you don't repeat the flag.
+
 - `--all` updates every repo, printing one summary line each (and
-  flagging any whose upstream has gone missing).
+  flagging any whose upstream has gone missing). A repo that hits a merge
+  conflict is reported and skipped without disturbing the others.
 
 - `-n`/`--dry-run` reports how many new commits each repo has without
   changing anything.
@@ -116,9 +151,10 @@ Run it against a local clone of the monorepo (it mutates that clone):
 - `--push` pushes the updated default branch and per-repo refs to
   `origin` afterward.
 
-`update` only replays linear history; if a repo's new upstream commits
-include a merge it is refused (single repo) or skipped (`--all`), since
-the replay can't reproduce merge commits.
+In **replay** mode `update` only handles linear history: if a repo's new
+upstream commits include a merge it is refused (single repo) or skipped
+(`--all`). Use `--merge` for repos whose upstream accumulates merge
+commits, or whose `name/` subdirectory the monorepo also edits.
 
 
 # Retiring the original repos
