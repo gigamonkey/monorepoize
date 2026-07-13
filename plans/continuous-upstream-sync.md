@@ -301,7 +301,10 @@ abort-and-strand behavior:
 
 ## Testing
 
-No automated tests exist; verify end-to-end in a scratch dir per `CLAUDE.md`:
+The `test/` harness (`test/subtree-merge.sh`, `test/subtree-merge-edge-cases.sh`)
+already covers the scenarios below against the `-X subtree=` primitive; extend it
+as the `update --merge` path is implemented. Verify end-to-end in a scratch dir
+per `CLAUDE.md`:
 
 - Create a throwaway source repo, `build` a monorepo from it.
 - **Concurrent divergence:** commit to `foo/` in the monorepo *and* commit

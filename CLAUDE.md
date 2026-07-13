@@ -74,8 +74,16 @@ extraction and updating both depend on them.
 
 ## Testing changes
 
-There are no automated tests. Verify changes end-to-end in a scratch
-directory: create a couple of throwaway source repos, list their paths in a
-`name.repos` file, run `./build name.repos`, then exercise `add`/`update`/
-`extract` against the result and check refs (`git branch -a`, `git tag`) and
-that extracted SHAs match the originals.
+There is no CI. The `test/` directory holds self-contained bash scripts (run
+directly, e.g. `./test/subtree-merge.sh`) that build throwaway monorepos in a
+`mktemp` dir under an isolated git config and assert behavior; they exit with
+the number of failed checks. They currently cover the `git merge -X subtree=`
+primitive behind the planned merge-based sync (`plans/continuous-upstream-sync.md`),
+not the shipped commands. `test/lib.sh` is the shared PASS/FAIL + git-env
+harness.
+
+For anything not yet scripted, verify end-to-end in a scratch directory: create
+a couple of throwaway source repos, list their paths in a `name.repos` file, run
+`./build name.repos`, then exercise `add`/`update`/`extract` against the result
+and check refs (`git branch -a`, `git tag`) and that extracted SHAs match the
+originals.
