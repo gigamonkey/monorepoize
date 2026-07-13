@@ -169,32 +169,53 @@ code fragile). Record it explicitly and use ancestry as the mechanism:
   step (e.g. `update --establish-baseline NAME`, or automatic on first `--merge`
   when divergence is detected).
 
-### Merge mechanics (to validate during implementation)
+### Merge mechanics (spiked — resolved)
 
-Subtree merges have several equivalent incantations with real reliability
-differences; pick one in a spike and lock it in. **Decision 3** rules out
-depending on the contrib `git subtree` command for portability, so both viable
-options are core git:
+**Decision 3** rules out the contrib `git subtree` command, leaving two core-git
+options. Both were exercised in a scratch spike (see "Spike results" below):
 
-- `git merge -s recursive -X subtree=foo <mirror-tip>` — relies on the recursive
-  strategy's prefix-shift; robust when the prefix is given explicitly (don't rely
-  on auto-detection). Core git, always present.
-- `git merge-tree --write-tree` (git ≥ 2.38) three-way on the `foo/` subtree,
-  then commit the result manually with the upstream tip as a second parent — the
-  most explicit and scriptable, no working-tree churn, but requires newer git and
-  more plumbing.
-- (`git subtree merge --prefix=foo <mirror-tip>` is the highest-level form, but
-  the `git subtree` command is a `contrib/` script that is **not guaranteed
-  installed** — absent on stock macOS Xcode git, sometimes unbundled on Linux.
-  Ruled out as a dependency for that reason; only its underlying merge strategy,
-  which we get directly above, is core.)
+- **`git merge --no-edit -X subtree=<name> <mirror-tip>` — chosen.** The `ort`
+  strategy's explicit-prefix shift reconciles a prefixed `ours` against a
+  root-level base/theirs correctly. Core git, no version floor (works on stock
+  macOS git), records a real merge commit whose second parent is the upstream
+  tip (so the base advances automatically). This is the primary primitive.
+- `git merge-tree --write-tree` (git ≥ 2.38) — viable but requires manually
+  building the shifted trees (`GIT_INDEX_FILE=<tmp> git read-tree
+  --prefix=<name>/ <tree>; git write-tree`, wrapped in throwaway `commit-tree`s
+  so an explicit `--merge-base` can be passed). Its advantage is that it touches
+  neither working tree nor index — ideal for **`--dry-run` conflict prediction**.
+  Keep it only for that, guarded by a git-version check; it is not needed for the
+  real merge.
 
-Recommendation: prototype the recursive `-X subtree=foo` form first (fewest
-dependencies, works on older git), fall back to explicit `merge-tree` plumbing if
-prefix detection misbehaves — mindful that `merge-tree --write-tree` raises the
-minimum git version to 2.38. Note that `pushdown_one`'s `-X no-renames` is
-specific to the initial unrelated-history merge and should **not** be carried
-into sync merges, where rename detection is desirable.
+Note that `pushdown_one`'s `-X no-renames` is specific to the initial
+unrelated-history merge and should **not** be carried into sync merges, where
+rename detection is desirable.
+
+#### Spike results
+
+A scratch spike (real `build` + a throwaway upstream) confirmed
+`-X subtree=<name>` handles every scenario this plan depends on — 29/29 checks:
+
+- **Clean concurrent divergence:** monorepo edits `foo/a`, upstream edits `b` →
+  merges cleanly, both kept.
+- **Overlapping conflict → resolved → recorded:** same-line edits conflict on
+  exactly `foo/c`; after resolving and committing, a *later* upstream change
+  merges without re-hitting the old conflict (the core win over `am` replay).
+- **Upstream history containing a merge commit** syncs fine — confirming the
+  linear-history restriction genuinely disappears (decision 2).
+- **Baseline via `git merge -s ours <mirror-tip>`** records the upstream tip as
+  merged while keeping the monorepo's content, and a subsequent real change then
+  merges cleanly from the new base — the migration path works.
+- **Multi-repo confinement:** in a monorepo with `widget/` + `gadget/`, a
+  `widget` sync left `gadget/`'s tree byte-identical, with no file leakage
+  between subdirs — the explicit prefix does not mis-shift when siblings exist.
+- **Upstream deletions** propagate under `foo/` and only there.
+- **`extract` invariant intact:** the upstream tip SHA is still present
+  byte-for-byte in the monorepo after several syncs.
+
+(Two initial spike failures were harness bugs, not primitive failures:
+`git commit -am` skips new untracked files, and `mktemp` hands `read-tree` a
+zero-byte file it rejects as an index. Both fixed; all green after.)
 
 ## Sync mode: opt-in per repo, backward compatible
 
@@ -260,9 +281,9 @@ abort-and-strand behavior:
 
 ## Implementation steps
 
-1. **Spike the merge primitive** in a scratch repo (see Testing) to choose
-   between core `-X subtree=foo` and `merge-tree --write-tree` plumbing (the
-   contrib `git subtree` command is ruled out — decision 3). This gates the rest.
+1. ~~**Spike the merge primitive.**~~ **Done** — `git merge -X subtree=<name>`
+   chosen and validated across all scenarios (see "Merge mechanics → Spike
+   results"). No longer gates the rest.
 2. **Add the `synced` marker** and a helper in `monorepo.sh` to read/upsert it
    (mirror `stage_source`). Record the initial tip in `add`/`build`.
 3. **Add sync-mode metadata** + `add`/`build` flag.
@@ -317,9 +338,11 @@ No automated tests exist; verify end-to-end in a scratch dir per `CLAUDE.md`:
    mirror, real upstream ancestry, no squash/rewrite). See Non-goals for the
    specific constraints this imposes.
 
-## Remaining open question
+5. **Merge primitive — spiked and settled: `git merge -X subtree=<name>`.** It
+   reconciles a prefixed `ours` against a root-level base/theirs across every
+   scenario (clean, conflict-then-recorded, upstream-with-merge, baseline,
+   multi-repo, deletions) with no version floor. `merge-tree --write-tree` is
+   kept only as an optional `--dry-run` conflict predictor. See "Merge
+   mechanics" for details and the spike results.
 
-- **Merge primitive:** the spike (implementation step 1) still has to pick
-  between `-X subtree=foo` and `merge-tree --write-tree` and confirm prefix
-  handling is reliable against a base/ours/theirs where `ours` is prefixed and
-  base/theirs are root-level. Everything else above is settled.
+Nothing above remains open; the design is ready to implement.
