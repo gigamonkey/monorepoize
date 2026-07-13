@@ -96,7 +96,10 @@ Run it against a local clone of the monorepo (it mutates that clone):
 - The upstream URL for each repo comes from the committed
   `.monorepoize/sources` file. Override one repo with `-u URL`, or point
   at a `.repos` file with `--repos FILE` (matched by URL basename) for
-  monorepos built before sources were recorded.
+  monorepos built before sources were recorded. In that case (no
+  `.monorepoize/sources` in the monorepo yet) the URLs resolved from the
+  `.repos` file are also recorded and committed, so subsequent runs need
+  no `--repos`.
 
 - `--same-origin` derives each upstream from the monorepo's own
   `origin`: the origin URL with its last path segment replaced by

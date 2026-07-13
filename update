@@ -17,7 +17,9 @@
 # .repos file with --repos, or, when every repo is eponymous and lives on the
 # same origin as the monorepo, derive URLs from the monorepo's own origin with
 # --same-origin (the monorepo's origin URL with its last path segment replaced by
-# <name>.git).
+# <name>.git). A monorepo built before sources were recorded gets them
+# backfilled: running with --repos records (and commits) the resolved URLs in
+# .monorepoize/sources, so later runs need no --repos.
 #
 # Run it against a local clone of the monorepo (it mutates that clone); push the
 # result back with --push, or yourself afterward.
@@ -48,7 +50,10 @@ Options:
   -u, --upstream URL  Source repo to pull from (single repo only). Overrides the
                       URL recorded in .monorepoize/sources.
       --repos FILE    A .repos file (one source URL per line) to resolve upstream
-                      URLs from, matching each repo by URL basename.
+                      URLs from, matching each repo by URL basename. If the
+                      monorepo has no .monorepoize/sources yet (built before
+                      sources were recorded), the URLs are recorded and
+                      committed so future runs need no --repos.
       --same-origin   Derive each upstream from the monorepo's own origin: the
                       origin URL with its last path segment replaced by <name>.git
                       (only valid when the repos are eponymous and on that origin).
@@ -137,21 +142,28 @@ if [ "$SAME_ORIGIN" -eq 1 ] && [ -z "$ORIGIN" ]; then
   die "--same-origin needs an 'origin' remote on the monorepo to derive upstream URLs"
 fi
 
+# Look a repo's URL up in the --repos file by URL basename. Prints the URL and
+# returns 0, or returns 1 if the file wasn't given or has no match.
+url_from_repos_file() {
+  local name="$1" line b
+  [ -n "$REPOS_FILE" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    b=${line##*/}; b=${b%.git}
+    if [ "$b" = "$name" ]; then printf '%s' "$line"; return 0; fi
+  done < "$REPOS_FILE"
+  return 1
+}
+
 # Resolve the upstream URL for a repo, most authoritative source first: explicit
 # --upstream, then a --repos file (matched by URL basename), then the recorded
 # .monorepoize/sources, then the --same-origin heuristic (origin URL with its
 # last path segment replaced by <name>.git). Prints the URL and returns 0, or
 # returns 1 if none is known.
 upstream_for() {
-  local name="$1" url="" line b
+  local name="$1" url=""
   if [ -n "$UPSTREAM" ]; then printf '%s' "$UPSTREAM"; return 0; fi
-  if [ -n "$REPOS_FILE" ]; then
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      b=${line##*/}; b=${b%.git}
-      if [ "$b" = "$name" ]; then printf '%s' "$line"; return 0; fi
-    done < "$REPOS_FILE"
-  fi
+  if url=$(url_from_repos_file "$name"); then printf '%s' "$url"; return 0; fi
   if [ -n "$SOURCES" ]; then
     url=$(printf '%s\n' "$SOURCES" | awk -v n="$name" '$1 == n { print $2; exit }')
     [ -n "$url" ] && { printf '%s' "$url"; return 0; }
@@ -159,6 +171,30 @@ upstream_for() {
   if [ "$SAME_ORIGIN" -eq 1 ]; then printf '%s' "${ORIGIN%/*}/$name.git"; return 0; fi
   return 1
 }
+
+# Backfill for monorepos built before source URLs were recorded: when there is
+# no .monorepoize/sources but a --repos file was given, record (and commit) the
+# URL of every constituent repo the file can resolve, so future runs need no
+# --repos. Only the --repos file is consulted (not -u, which in single-repo
+# mode would misattribute one URL to every name).
+if [ -z "$SOURCES" ] && [ -n "$REPOS_FILE" ] && [ "$DRYRUN" -eq 0 ]; then
+  echo "No .monorepoize/sources in this monorepo; recording sources from $(basename "$REPOS_FILE") ..." >&2
+  git checkout --quiet "$MONO_MAIN"
+  recorded=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    url=$(url_from_repos_file "$name") || continue
+    stage_source "$name" "$url"
+    recorded=$((recorded + 1))
+  done <<< "$(constituent_names .)"
+  if [ "$recorded" -gt 0 ]; then
+    git commit -q -m "Record source URLs."
+    SOURCES=$(git show "$MONO_MAIN:.monorepoize/sources")
+    echo "Recorded $recorded source URL(s) in .monorepoize/sources." >&2
+  else
+    echo "No constituent repos matched a URL in $(basename "$REPOS_FILE"); nothing recorded." >&2
+  fi
+fi
 
 # Update one repo. Sets _status (nobranch|nourl|missing|uptodate|merges|pending|
 # updated|conflict) and _count; prints nothing; never exits.
